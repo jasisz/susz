@@ -2,7 +2,7 @@
 // writes parsed by position, any other line through the JSON parser.
 
 use super::json::{self, J};
-use super::pk::{Col, Pk};
+use super::pk::{col_a, col_b, Pk, MAX_EXPRS};
 use super::{cant, R};
 use std::io::Read;
 
@@ -185,8 +185,11 @@ pub fn col_run(pk: &mut Pk, b: &[u8], mut p: usize, lim: usize) -> (usize, u64) 
     let mut maxn = 0u64;
     let e0 = pk.exprs as u64;
     let mut e = e0;
-    let ecap = pk.colcap.min(0xFFFF_FFFE);
-    let base = unsafe { pk.colp.add(e0 as usize) };
+    let ecap = pk.colcap.min(MAX_EXPRS as u64);
+    let (ap, bp) = (pk.ap, pk.bp);
+    // a line takes at least 16 bytes
+    pk.cols.names.reserve((lim - p) / 16 + 1);
+    let mut np = unsafe { pk.cols.names.as_mut_ptr().add(pk.cols.names.len()) };
     const APP0: u64 = word(b"{\"app\":{", 0, 8);
     const APP1: u64 = word(b":{\"arg\":", 0, 8);
     const FA0: u64 = word(b"{\"forall", 0, 8);
@@ -278,16 +281,21 @@ pub fn col_run(pk: &mut Pk, b: &[u8], mut p: usize, lim: usize) -> (usize, u64) 
             break;
         }
         unsafe {
-            base.add((e - e0) as usize).write(Col {
-                k,
-                a: x as u32,
-                b: y as u32,
-            });
+            ap.add(e as usize).write(col_a(x as u32, k));
+            bp.add(e as usize).write(col_b(y as u32, k));
+            if k & 15 >= 2 {
+                np.write(k >> 4);
+                np = np.add(1);
+            }
         }
         e += 1;
         p = q;
     }
     let cnt = e - e0;
+    unsafe {
+        let l = np.offset_from(pk.cols.names.as_ptr()) as usize;
+        pk.cols.names.set_len(l);
+    }
     if nfloat && maxn > 0 {
         pk.nr.note(maxn - 1);
     }

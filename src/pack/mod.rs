@@ -81,6 +81,54 @@ macro_rules! cant {
 pub(crate) use cant;
 pub(crate) use inv;
 
+// Gives the pages of v[from..to] back to the system; v is not read there
+// again.
+pub(crate) fn give_back_range<T>(v: &[T], from: usize, to: usize) {
+    let to = to.min(v.len());
+    if from < to {
+        let (p, size) = (v.as_ptr() as usize, std::mem::size_of::<T>());
+        release(p + from * size, p + to * size);
+    }
+}
+
+// Frees a large vector for good. On macOS the allocator keeps freed large
+// blocks for reuse, still counted as the process's memory, so their pages
+// are given back first.
+pub(crate) fn give_back<T>(v: Vec<T>) {
+    let bytes = v.capacity() * std::mem::size_of::<T>();
+    if bytes >= 1 << 20 {
+        let p = v.as_ptr() as usize;
+        release(p, p + bytes);
+    }
+    drop(v);
+}
+
+// The whole pages within from..to, memory nothing reads again before it is
+// written or freed.
+#[allow(unused_variables)]
+fn release(from: usize, to: usize) {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        extern "C" {
+            fn madvise(addr: *mut std::ffi::c_void, len: usize, advice: i32) -> i32;
+        }
+        // MADV_FREE_REUSABLE takes the pages out of the footprint on macOS;
+        // MADV_DONTNEED frees them on Linux
+        #[cfg(target_os = "macos")]
+        const ADVICE: i32 = 7;
+        #[cfg(target_os = "linux")]
+        const ADVICE: i32 = 4;
+        // a multiple of every page size these systems use
+        const PAGE: usize = 1 << 14;
+        let (start, end) = ((from + PAGE - 1) & !(PAGE - 1), to & !(PAGE - 1));
+        if end > start {
+            unsafe {
+                madvise(start as *mut std::ffi::c_void, end - start, ADVICE);
+            }
+        }
+    }
+}
+
 /// Packing options.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -188,7 +236,7 @@ fn read(input: &str, opts: &Options) -> R<(pk::Pk, bool)> {
         }
     }
     let mut pk = pk::Pk::new(size);
-    pk.own_cols(size);
+    pk.reserve_all(size);
     lines::read_file(input, &mut pk, 16 << 20)?;
     pk.finish();
     Ok((pk, false))

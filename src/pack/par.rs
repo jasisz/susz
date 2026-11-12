@@ -15,7 +15,7 @@ use super::{cant, R};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 
-struct SendPtr(*mut super::pk::Col);
+struct SendPtr(*mut u32, *mut u32);
 unsafe impl Send for SendPtr {}
 unsafe impl Sync for SendPtr {}
 
@@ -70,7 +70,7 @@ fn parse_range(path: &str, from: u64, to: u64, pk: &mut Pk) -> R<()> {
             break;
         }
     }
-    pk.flush_run_pub();
+    pk.finish_range();
     Ok(())
 }
 
@@ -122,18 +122,20 @@ pub fn parse_parallel(path: &str, threads: usize) -> R<Option<Pk>> {
         cuts.push(c.max(*cuts.last().unwrap()));
     }
     cuts.push(size);
-    // one allocation of columns for all
+    // one allocation of the a and b columns for all
     let cap = size as usize / 16 + 16;
-    let mut cols: Vec<super::pk::Col> = Vec::with_capacity(cap);
-    let colp = SendPtr(cols.as_mut_ptr());
+    let mut ca: Vec<u32> = Vec::with_capacity(cap);
+    let mut cb: Vec<u32> = Vec::with_capacity(cap);
+    let colp = SendPtr(ca.as_mut_ptr(), cb.as_mut_ptr());
     let colp = &colp;
     let results: Vec<R<Pk>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..threads)
             .map(|k| {
                 let (from, to) = (cuts[k], cuts[k + 1]);
                 sc.spawn(move || {
-                    let mut w = Pk::new_worker((to - from) as usize, k as u32);
-                    w.colp = colp.0;
+                    let mut w = Pk::new_worker((to - from) as usize);
+                    w.ap = colp.0;
+                    w.bp = colp.1;
                     w.colcap = cap as u64;
                     parse_range(path, from, to, &mut w).map(|_| w)
                 })
@@ -174,30 +176,36 @@ pub fn parse_parallel(path: &str, threads: usize) -> R<Option<Pk>> {
     }
     // merge
     let n = ne as usize;
-    unsafe {
-        cols.set_len(n);
-    }
-    pk.cols = cols;
-    pk.colp = pk.cols.as_mut_ptr();
-    pk.colcap = cap as u64;
     pk.names = nn as u32;
     pk.levels = nl_ as u32;
     pk.exprs = ne as u32;
     let total_stream: usize = ws.iter().map(|w| w.stream.len()).sum();
     let mut stream = Vec::with_capacity(total_stream);
     let mut dmeta: Vec<u32> = Vec::new();
-    let mut xbufs = Vec::with_capacity(ws.len());
+    unsafe {
+        ca.set_len(n);
+        cb.set_len(n);
+    }
+    pk.cols.a = ca;
+    pk.cols.b = cb;
+    pk.cols.names = Vec::with_capacity(ws.iter().map(|w| w.cols.names.len()).sum());
+    pk.cols.x = Vec::with_capacity(ws.iter().map(|w| w.cols.x.len()).sum());
+    pk.cols.loffs = Vec::with_capacity(ws.iter().map(|w| w.cols.loffs.len()).sum());
     let mut decls = 0u32;
     for w in ws.iter_mut() {
         stream.extend_from_slice(&w.stream);
-        w.stream = Vec::new();
+        super::give_back(std::mem::take(&mut w.stream));
         dmeta.extend_from_slice(&w.dmeta);
-        xbufs.push(std::mem::take(&mut w.xbuf));
+        let c = std::mem::take(&mut w.cols);
+        let base = pk.cols.x.len() as u64;
+        pk.cols.names.extend_from_slice(&c.names);
+        pk.cols.x.extend_from_slice(&c.x);
+        pk.cols.loffs.extend(c.loffs.iter().map(|o| o + base));
+        c.give_back();
         decls += w.decls;
     }
     drop(ws);
     pk.stream = stream;
-    pk.xbufs = xbufs;
     pk.decls = decls;
     // owners seeded and names made canonical, in file order
     let mut owner = vec![NONE; n];

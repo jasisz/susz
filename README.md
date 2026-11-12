@@ -45,6 +45,25 @@ susz unpack FILE.susz OUT.ndjson
 matter how many threads you use. `--no-index` leaves the index out. The output
 only appears once it is complete, so you never end up with half a file.
 
+`pack` reads the export once, in pieces, and never holds all of it. What it
+does hold is the expressions: two 4-byte columns and a 4-byte owner for each
+one, which is most of its memory. Packing mathlib (105 million expressions) on
+the M2 Pro below, median of three warm runs, with INDEX ("before" is the
+previous packer, which kept 20 bytes per expression and freed nothing until
+the end):
+
+| | wall | instructions | peak footprint | max RSS |
+| --- | --- | --- | --- | --- |
+| 1 thread, before | 5.3 s | 36.4 G | 2678 MB | 2677 MB |
+| 1 thread | 5.4 s | 38.0 G | 1548 MB | 1943 MB |
+| 4 threads, before | 3.5 s | 36.7 G | 2775 MB | 2774 MB |
+| 4 threads | 3.5 s | 38.5 G | 1531 MB | 2058 MB |
+
+Without INDEX it is about 5% fewer instructions and the same memory.
+(MB here are MiB.) The max RSS is higher than the footprint because the
+columns `pack` is done with are handed back to the system as it goes; macOS
+still counts those pages as resident until it needs them.
+
 `verify` checks the structure of a file: framing, every record, every proof
 block. It does not type-check anything; that's the checker's job. The first
 problem is reported with where it is, for example

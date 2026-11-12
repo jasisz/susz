@@ -148,9 +148,53 @@ impl Ren {
     }
 }
 
+// Expressions are numbered below 2^30 - 1: the columns keep two bits of
+// the kind above each child's id.
+pub const MAX_EXPRS: u32 = LOW;
+// The expressions in columns, by id. a and b hold the children of an
+// application or binder (ids below 2^30) and its kind in their top two
+// bits: the low two bits of the kind in a's, the high two in b's (kind 0, a
+// leaf: any expression that is not an application or a binder). names
+// holds each binder's name in turn. A leaf's record (as section 9 writes
+// it, with absolute ids) is in x, at loffs, in turn.
+#[derive(Default)]
+pub struct Cols {
+    pub a: Vec<u32>,
+    pub b: Vec<u32>,
+    pub names: Vec<u32>,
+    pub x: Vec<u8>,
+    pub loffs: Vec<u64>,
+}
+
+impl Cols {
+    pub fn give_back(self) {
+        use super::give_back;
+        give_back(self.a);
+        give_back(self.b);
+        give_back(self.names);
+        give_back(self.x);
+        give_back(self.loffs);
+    }
+}
+
+#[inline(always)]
+pub fn col_a(x: u32, k: u32) -> u32 {
+    x | (k << 30)
+}
+#[inline(always)]
+pub fn col_b(y: u32, k: u32) -> u32 {
+    y | ((k & 12) << 28)
+}
+
+// The kind and children of a and b as the columns hold them.
+#[inline(always)]
+pub fn split(a: u32, b: u32) -> (u32, u32, u32) {
+    ((a >> 30) | ((b >> 30) << 2), a & LOW, b & LOW)
+}
+
+// An application or binder read back: kind and name (as k), children.
 #[derive(Clone, Copy)]
-#[repr(C)]
-pub struct Col {
+pub struct Dec {
     pub k: u32,
     pub a: u32,
     pub b: u32,
@@ -171,14 +215,16 @@ pub struct Pk {
     pub decls: u32,
     pub run: u32,
     pub stream: Vec<u8>,
-    // the columns: one allocation for every expression the file can hold
-    // (a line takes at least 16 bytes), written at the expression's id;
-    // workers share one and write at global ids
-    pub cols: Vec<Col>,
-    pub colp: *mut Col,
+    // the expressions read: a and b written at the expression's id through
+    // ap and bp, room for colcap (one allocation for every expression the
+    // file can hold; workers share one and write at global ids); the other
+    // columns are a worker's own until merged
+    pub cols: Cols,
+    pub ap: *mut u32,
+    pub bp: *mut u32,
     pub colcap: u64,
+    // a leaf record being built
     pub xbuf: Vec<u8>,
-    pub xbufs: Vec<Vec<u8>>,
     pub canon: Vec<u32>,
     pub cn: Canon,
     pub owner: Vec<u32>,
@@ -186,7 +232,6 @@ pub struct Pk {
     // parsing a range on a worker: no owners or canonical names made here
     pub worker: bool,
     pub fl: bool,
-    pub xid: u32,
     // per declaration: its kind, the number of names it declares, those
     // names (dense name ids)
     pub dmeta: Vec<u32>,
@@ -221,11 +266,11 @@ impl Pk {
             decls: 0,
             run: 0,
             stream: Vec::with_capacity(size_hint / 16 + 1024),
-            cols: Vec::new(),
-            colp: std::ptr::null_mut(),
+            cols: Cols::default(),
+            ap: std::ptr::null_mut(),
+            bp: std::ptr::null_mut(),
             colcap: 0,
-            xbuf: Vec::with_capacity(size_hint / 256 + 1024),
-            xbufs: Vec::new(),
+            xbuf: Vec::with_capacity(1024),
             canon: {
                 let mut v = Vec::with_capacity(size_hint / 400 + 16);
                 v.push(0);
@@ -236,7 +281,6 @@ impl Pk {
             meta: Vec::new(),
             worker: false,
             fl: false,
-            xid: 0,
             dmeta: Vec::new(),
             draw: Vec::new(),
             dpieces: Vec::new(),
@@ -245,11 +289,10 @@ impl Pk {
         }
     }
 
-    pub fn new_worker(size_hint: usize, xid: u32) -> Pk {
+    pub fn new_worker(size_hint: usize) -> Pk {
         let mut pk = Pk::new(size_hint);
         pk.worker = true;
         pk.fl = true;
-        pk.xid = xid;
         pk.nr = Ren::new_floating();
         pk.lr = Ren::new_floating();
         pk.er = Ren::new_floating();
@@ -302,28 +345,34 @@ impl Pk {
             self.run = 0;
         }
     }
-    // Columns of their own, for one worker or none.
-    pub fn own_cols(&mut self, size: usize) {
+    // Reading on one worker: room reserved for the columns and owners of all
+    // the expressions the file can hold (a line takes at least 16 bytes);
+    // pages are only taken as they are written.
+    pub fn reserve_all(&mut self, size: usize) {
         let cap = size / 16 + 16;
-        self.cols = Vec::with_capacity(cap);
-        self.colp = self.cols.as_mut_ptr();
+        self.cols.a = Vec::with_capacity(cap);
+        self.cols.b = Vec::with_capacity(cap);
+        self.ap = self.cols.a.as_mut_ptr();
+        self.bp = self.cols.b.as_mut_ptr();
         self.colcap = cap as u64;
+        self.owner = Vec::with_capacity(cap);
     }
-    pub fn flush_run_pub(&mut self) {
+    pub fn finish_range(&mut self) {
         self.flush_run();
     }
     pub fn finish(&mut self) {
-        self.flush_run();
+        self.finish_range();
         self.owner.resize(self.exprs as usize, NONE);
         unsafe {
-            self.cols.set_len(self.exprs as usize);
+            self.cols.a.set_len(self.exprs as usize);
+            self.cols.b.set_len(self.exprs as usize);
         }
     }
 
     #[inline(always)]
-    fn new_expr(&mut self, ie: u64, k: u32, a: u32, b: u32) -> R<()> {
+    fn begin(&mut self, ie: u64) -> R<u32> {
         if self.er.floating {
-            if ie >= u32::MAX as u64 {
+            if ie >= MAX_EXPRS as u64 {
                 return Err(cant!("expression id out of range for a worker"));
             }
             self.exprs = ie as u32;
@@ -332,28 +381,44 @@ impl Pk {
             self.er.below = ie;
         }
         let e = self.exprs;
-        if e == u32::MAX {
-            return Err(cant!("too many expressions"));
+        if e >= MAX_EXPRS {
+            return Err(cant!("too many expressions for this packer"));
         }
         self.er.define(ie, e, "expression")?;
         if e as u64 >= self.colcap {
             return Err(cant!("more expressions than the file can hold"));
         }
-        unsafe {
-            self.colp.add(e as usize).write(Col { k, a, b });
-        }
         self.exprs = e + 1;
         self.run += 1;
+        Ok(e)
+    }
+    #[inline(always)]
+    fn new_expr(&mut self, ie: u64, k: u32, a: u32, b: u32) -> R<()> {
+        let e = self.begin(ie)?;
+        unsafe {
+            self.ap.add(e as usize).write(col_a(a, k));
+            self.bp.add(e as usize).write(col_b(b, k));
+        }
+        if k & 15 >= 2 {
+            self.cols.names.push(k >> 4);
+        }
+        Ok(())
+    }
+    fn new_leaf(&mut self, ie: u64) -> R<()> {
+        let e = self.begin(ie)?;
+        unsafe {
+            self.ap.add(e as usize).write(0);
+            self.bp.add(e as usize).write(0);
+        }
+        self.cols.loffs.push(self.cols.x.len() as u64);
+        self.cols.x.extend_from_slice(&self.xbuf);
         Ok(())
     }
     #[inline(always)]
-    fn xstart(&mut self, ie: u64) -> R<u32> {
+    fn xstart(&mut self, ie: u64) -> R<()> {
         self.er.fresh(ie, "expression")?;
-        let off = self.xbuf.len();
-        if off > u32::MAX as usize - 1 {
-            return Err(cant!("too many literal bytes for this packer"));
-        }
-        Ok(off as u32)
+        self.xbuf.clear();
+        Ok(())
     }
 
     #[inline(always)]
@@ -373,20 +438,20 @@ impl Pk {
         self.new_expr(ie, (nn << 4) | ((if lam { 2 } else { 6 }) + bi), kt, kb)
     }
     pub fn bvar(&mut self, ie: u64, k: u64) -> R<()> {
-        let off = self.xstart(ie)?;
+        self.xstart(ie)?;
         self.xbuf.push(7);
         wv(&mut self.xbuf, k);
-        self.new_expr(ie, 0, off, self.xid)
+        self.new_leaf(ie)
     }
     pub fn sort(&mut self, ie: u64, l: u64) -> R<()> {
-        let off = self.xstart(ie)?;
+        self.xstart(ie)?;
         let kl = self.lv(l)?;
         self.xbuf.push(8);
         wv(&mut self.xbuf, kl as u64);
-        self.new_expr(ie, 0, off, self.xid)
+        self.new_leaf(ie)
     }
     pub fn cnst(&mut self, ie: u64, n: u64, us: &[u64]) -> R<()> {
-        let off = self.xstart(ie)?;
+        self.xstart(ie)?;
         let nn = self.nm(n)?;
         self.xbuf.push(9);
         wv(&mut self.xbuf, nn as u64);
@@ -395,20 +460,20 @@ impl Pk {
             let l = self.lv(u)?;
             wv(&mut self.xbuf, l as u64);
         }
-        self.new_expr(ie, 0, off, self.xid)
+        self.new_leaf(ie)
     }
     pub fn let_e(&mut self, ie: u64, n: u64, t: u64, v: u64, b: u64) -> R<()> {
-        let off = self.xstart(ie)?;
+        self.xstart(ie)?;
         let nn = self.nm(n)?;
         let (kt, kv, kb) = (self.eref(t)?, self.eref(v)?, self.eref(b)?);
         self.xbuf.push(13);
         for x in [nn, kt, kv, kb] {
             wv(&mut self.xbuf, x as u64);
         }
-        self.new_expr(ie, 0, off, self.xid)
+        self.new_leaf(ie)
     }
     pub fn nat(&mut self, ie: u64, digits: &[u8]) -> R<()> {
-        let off = self.xstart(ie)?;
+        self.xstart(ie)?;
         if digits.first() == Some(&b'-') {
             return Err("negative Nat literal".into());
         }
@@ -418,24 +483,24 @@ impl Pk {
         self.xbuf.push(14);
         wv(&mut self.xbuf, bytes.len() as u64);
         self.xbuf.extend_from_slice(&bytes);
-        self.new_expr(ie, 0, off, self.xid)
+        self.new_leaf(ie)
     }
     pub fn strv(&mut self, ie: u64, s: &[u8]) -> R<()> {
-        let off = self.xstart(ie)?;
+        self.xstart(ie)?;
         self.xbuf.push(15);
         wv(&mut self.xbuf, s.len() as u64);
         self.xbuf.extend_from_slice(s);
-        self.new_expr(ie, 0, off, self.xid)
+        self.new_leaf(ie)
     }
     pub fn proj(&mut self, ie: u64, tn: u64, idx: u64, st: u64) -> R<()> {
-        let off = self.xstart(ie)?;
+        self.xstart(ie)?;
         let ks = self.eref(st)?;
         let nn = self.nm(tn)?;
         self.xbuf.push(16);
         wv(&mut self.xbuf, nn as u64);
         wv(&mut self.xbuf, idx);
         wv(&mut self.xbuf, ks as u64);
-        self.new_expr(ie, 0, off, self.xid)
+        self.new_leaf(ie)
     }
     // mdata is not written: ie stands for the expression it wraps.
     pub fn mdata(&mut self, ie: u64, x: u64) -> R<()> {
