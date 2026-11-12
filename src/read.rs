@@ -1579,7 +1579,7 @@ impl<'a> Iterator for Block<'a> {
     }
 }
 
-/// The full structural check of a file (spec 11): framing, every MAIN
+/// The full structural check of a file (spec section 10): framing, every MAIN
 /// record, the counts and PROOFS fill, then every proof block in
 /// declaration order. INDEX is not read (its directory entry is checked).
 pub fn verify(bytes: &[u8]) -> Outcome {

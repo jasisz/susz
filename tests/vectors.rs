@@ -51,7 +51,7 @@ fn vectors_are_current_and_read_as_expected() {
     );
 }
 
-// A full check does not depend on INDEX's content (spec 11, item 5): the
+// A full check does not depend on INDEX's content (spec section 10, item 5): the
 // base vector with its INDEX bytes replaced by any bytes of the same length
 // has the same outcome.
 #[test]

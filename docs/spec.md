@@ -11,12 +11,12 @@ versions (0, 1 and 2) are not Susz 1, and a Susz 1 reader does not read them.
 
 MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
-Sections 1-9 and 11 are normative. Appendix A lists the choices we made and
+Sections 1 to 10 are normative. Section 11 describes the test vectors. Appendix A lists the choices we made and
 why. The text refers to them as A.1 to A.14. Appendix B lists the changes
 from internal version 2. [`OPEN.md`](OPEN.md) lists questions that came up
 while implementing, with the answers the reference crate follows.
 
-## 1. Rules (unchanged from version 2)
+## 1. Rules
 
 1. **The file is input, not a witness.** A file holds structure only. It has
    no hashes, no ranges of loose bound variables, no flags and no other
@@ -37,10 +37,6 @@ while implementing, with the answers the reference crate follows.
    or not the reader looks at INDEX.
 5. **Packing is deterministic.** For a given export and INDEX setting (on or
    off), every canonical packer writes the same bytes (section 9).
-
-Susz 1 also keeps these parts of version 2: implicit dense ids, expressions
-named by back distance, proof blocks bounded by the frontier, and the trailer
-at the end of the file.
 
 ## 2. Outcomes
 
@@ -364,7 +360,7 @@ anyway, which are the MAIN prefix. It checks that:
 On the entries it decodes, it also checks the sort order, the front coding,
 and that `shared` is the full common prefix. A disagreement makes the subset
 check's outcome **index invalid**. It does not reject the file. A full check
-of the same file is unaffected. A full check does not read INDEX.
+of the same file is unaffected. A full check does not need to read INDEX.
 
 A tool may want to vouch for a whole INDEX, for instance in a packer's
 self-test. It checks every entry while it reads MAIN, with one comparison per
@@ -496,7 +492,7 @@ deterministic. A **canonical** packer MUST write the section 9 layout, with
 INDEX by default and without it under `--no-index`. Canonical packers MUST
 agree byte for byte on every corpus file, for each setting.
 
-## 11. Test vectors and accept/reject corpus (plan)
+## 11. Test vectors and corpus
 
 - **Format.** A vector is `vectors/{accept,reject,decline}/NAME.susz` plus
   `NAME.expect`. The `.expect` file gives the outcome, class, section, offset
@@ -508,9 +504,10 @@ agree byte for byte on every corpus file, for each setting.
 - **Accept:** minimal file (one axiom); MAIN-only file (no PROOFS); file with
   blocks; a block naming frontier items of each kind; varint edge values (0,
   127, 128, 2^63, 2^64−1); `nat` 0, 255, 256, 2^64, 2^200; strings with NUL
-  and 4-byte UTF-8; unknown informational section; PAD. The declarations of
-  every accept vector type-check in a Lean kernel. So a full checker accepts
-  them, and reaches the one fault of every reject vector made from them.
+  and 4-byte UTF-8; unknown informational section; PAD. The declarations in
+  every accept vector are valid Lean, so a full checker accepts them and
+  reaches the one fault in each reject vector made from them. (Checked with
+  Pestka; not yet with Lean's own kernel.)
 - **Reject (one or more each):** magic; reserved bytes; trailer length; end
   magic; directory overlap / gap / out of file / duplicate id / bad flags on
   a known id; counts mismatch; non-minimal varint; 11-byte varint; 10th byte
@@ -527,7 +524,8 @@ agree byte for byte on every corpus file, for each setting.
   and without `--no-index`. For each setting the files must be
   byte-identical. The two settings must give the same full-check outcome.
   The files must round-trip to the export's records, up to what section 9.1
-  drops. Mathlib and cslib run in CI where memory allows.
+  drops. Large exports such as mathlib are tested locally; CI runs only the
+  vectors.
 - **INDEX vectors.** Accept: a file with INDEX, a file without INDEX, and a
   lookup of every declared name in the Init vector that gives the right
   record. Bad INDEX: offset not at a declaration record, kind mismatch,
@@ -537,9 +535,9 @@ agree byte for byte on every corpus file, for each setting.
   vectors. A full check MUST give the same outcome as for the same file with
   a correct INDEX, or with none. A subset check that relies on the bad entry
   MUST give "index invalid". Accept vectors exist with and without INDEX.
-- **Differential testing and fuzzing.** cargo-fuzz runs on the Rust reader
-  and checks for no panic and no over-allocation. Two independent readers
-  read mutated files and must give the same outcome and location.
+- **Mutations.** The reference crate flips every single byte of the vectors
+  and checks that the reader never panics. Fuzzing with cargo-fuzz, and
+  comparing two independent readers on mutated files, are planned.
 
 ## Appendix A. Choices we made and why
 

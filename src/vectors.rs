@@ -1,4 +1,4 @@
-//! The test vectors (spec section 12): accept, reject, decline and
+//! The test vectors (spec section 11): accept, reject, decline and
 //! bad-INDEX files written in the `asm` language. Every reject vector is a
 //! minimal mutation of an accept vector, named after the rule it breaks;
 //! its expected location comes from the assembler (a record marked `!`, or
