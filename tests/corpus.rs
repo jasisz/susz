@@ -9,6 +9,8 @@
 // cargo test --release -- --ignored. With SUSZ_REQUIRE_CORPORA=1 (as in CI)
 // a missing init-prelude fails instead of skipping.
 
+mod common;
+
 use std::io::Read;
 use std::path::PathBuf;
 use susz::pack::{pack_to_vec, Fault, Options};
@@ -99,12 +101,15 @@ fn check_export(path: &str, tag: &str, threads: &[usize]) {
         .unwrap()
         .section(susz::format::SEC_INDEX)
         .is_none());
-    // accepted, same digest as the export
+    // accepted, same digest as the export; the single pass agrees with the
+    // two-pass check and hands out the records the iterators read
     for b in [&with, &without] {
         match susz::verify(b) {
             susz::Outcome::Accepted(_) => {}
             o => panic!("{tag}: {o:?}"),
         }
+        common::same_outcomes(b).unwrap_or_else(|e| panic!("{tag}: {e}"));
+        common::same_events(b).unwrap_or_else(|e| panic!("{tag}: {e}"));
     }
     let d = susz::digest::of_susz(&with).unwrap();
     assert_eq!(d, susz::digest::of_susz(&without).unwrap());

@@ -1,8 +1,10 @@
 //! Susz 1: a binary form of a Lean 4 kernel export (lean4export 3.1).
 //!
 //! - [`pack`]: lean4export ndjson to canonical Susz 1 bytes.
-//! - [`read`]: the reader: framing, MAIN records, proof blocks by range,
-//!   full structural verification with located errors.
+//! - [`read`]: the reader. [`read::decode`] reads a file in one pass into
+//!   the caller's own structures, checking every rule as it goes;
+//!   [`read::decode_block`] reads one proof block later; [`verify`] is the
+//!   full structural check, with located errors.
 //! - [`index`]: the INDEX section: lookups and their verification.
 //! - [`unpack`]: Susz 1 back to ndjson.
 //! - `mmap` (cargo feature `mmap`): `open_mmap`, a file's bytes through a
@@ -25,7 +27,7 @@ pub mod vectors;
 
 #[cfg(feature = "mmap")]
 pub use mmap::{open_mmap, Mapped};
-pub use read::{verify, Failure, Outcome};
+pub use read::{decode, verify, Failure, Outcome};
 
 /// A path removed if the process panics (the packer's temporary output).
 #[doc(hidden)]

@@ -81,9 +81,74 @@ match susz::verify(&bytes) {
 }
 ```
 
-The main entry points: `susz::read::File::open` opens a file and checks its
-framing, `File::main()` walks the records, `susz::read::Block` reads one proof
-block, and `susz::pack::pack_file` packs.
+To read a file into your own structures, use `susz::read::decode`. It goes
+over the file once. Each record is checked as it is read and then handed to
+your implementation of `susz::read::Visit`: names, levels and expressions in
+file order, and each declaration right after its proof block. Strings and
+name components are borrowed from the file. Names, levels and expressions
+come without an allocation of their own; only an inductive declaration
+builds a few vectors. There is no need to call `verify` first. If `decode`
+gets to the end without an error, `verify` accepts the file. If there is an
+error, `decode` reports the same one, at the same place.
+
+That last part takes a little care. The spec reports an error in MAIN before
+an error inside a proof block, but a single pass meets a block before the
+rest of MAIN. So when a block turns out broken, `decode` stops calling your
+visitor, checks the rest of MAIN anyway, and reports the block's error only
+if MAIN has none.
+
+```rust
+use susz::read::{decode, Expr, File, Visit};
+
+struct Count(u64);
+
+impl<'a> Visit<'a> for Count {
+    type Error = ();
+    fn expr(&mut self, _id: u32, _e: &Expr<'a>) -> Result<(), ()> {
+        self.0 += 1;
+        Ok(())
+    }
+    fn block_expr(&mut self, _k: u32, _e: &Expr<'_>) -> Result<(), ()> {
+        self.0 += 1;
+        Ok(())
+    }
+}
+
+let file = File::open(&bytes)?;
+let mut count = Count(0);
+match decode(&file, &mut count) {
+    Ok(_) => println!("{} expressions", count.0),
+    Err(e) => println!("{e:?}"),
+}
+```
+
+A proof block can also wait. Return `false` from `Visit::open_block` and
+decode the block when you need it with `susz::read::decode_block`, which
+checks it the same way. `Decoded::unread` counts the blocks left like that.
+The file only counts as accepted once each of them has been decoded without
+an error.
+
+What reading costs, on the same M2 Pro as below, files mapped, median of
+three warm runs. The `decode` rows use a visitor that adds up every field it
+is given, so they do a little more than `verify`. "Before" is the reader
+before `decode` existed, where a checker that wanted the records had to read
+the file a second time.
+
+| | Init: instructions, wall | mathlib: instructions, wall, peak footprint |
+| --- | --- | --- |
+| `verify`, before | 1.75 G, 0.14 s | 29.8 G, 2.7 s, 210 MiB |
+| `verify` | 0.82 G, 0.11 s | 13.4 G, 1.9 s, 182 MiB |
+| `verify`, then the records again, before | 3.64 G, 0.29 s | 62.6 G, 5.7 s, 335 MiB |
+| `decode`, each block at its theorem | 1.14 G, 0.12 s | 19.0 G, 2.2 s, 198 MiB |
+| `decode`, then each block with `decode_block` | 1.10 G, 0.11 s | 18.5 G, 2.0 s, 210 MiB |
+
+Most of the gain over the old reader is not the single pass itself. Varints
+of two to eight bytes are now read with one 8-byte load instead of a byte at
+a time, and the record readers are inlined into the loop.
+
+The pieces underneath are public too: `susz::read::File::open` opens a file
+and checks its framing, `File::main()` walks the records, `susz::read::Block`
+reads one proof block, and `susz::pack::pack_file` packs.
 
 `susz::index::Lookup` finds declarations by name. It decodes the index once
 and keeps its place in MAIN between lookups. The binary search is the cheap
@@ -114,7 +179,8 @@ it says the file was truncated or couldn't be read, removes any partial
 output, and exits 2.
 
 What it buys, measured on mathlib (Susz 623 MB with INDEX, 608 MB without) on
-an M2 Pro, median of three warm runs:
+an M2 Pro, median of three warm runs, with the reader as it was before
+`decode` (it is faster now, see above, but mapping changes the same things):
 
 | | wall | instructions | peak footprint | max RSS |
 | --- | --- | --- | --- | --- |
@@ -144,7 +210,7 @@ shorter than 2^32 − 2 bytes. A longer one makes it decline.
 
 ```sh
 cargo test --release                 # unit tests, vectors, init-prelude
-cargo test --release -- --ignored    # Init, about 10 s
+cargo test --release -- --ignored    # Init, about 20 s
 cargo run --example gen-vectors      # regenerate tests/vectors/
 ```
 

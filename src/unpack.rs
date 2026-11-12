@@ -4,9 +4,10 @@
 //! `letE.nondep` is written `false`. Packing the output again gives the
 //! same Susz bytes.
 
-use crate::canon::Part;
 use crate::format;
-use crate::read::{Block, Decl, Event, Expr, Failure, File, Head, Hints, Ids, Level, Ref};
+use crate::read::{
+    Block, Component, Decl, Event, Expr, Failure, File, Head, Hints, Ids, Level, Ref,
+};
 use std::fmt::Write as _;
 use std::io::Write;
 
@@ -148,12 +149,12 @@ pub fn unpack<W: Write>(bytes: &[u8], w: &mut W) -> Result<(), UnpackError> {
         }
         match ev? {
             Event::Name { id, prefix, part } => match part {
-                Part::Str(s) => {
+                Component::Str(s) => {
                     let _ = write!(out, "{{\"in\":{id},\"str\":{{\"pre\":{prefix},\"str\":");
-                    jstr(&mut out, s);
+                    jstr(&mut out, s.as_bytes());
                     out.push_str("}}\n");
                 }
-                Part::Num(k) => {
+                Component::Num(k) => {
                     let _ = writeln!(
                         out,
                         "{{\"in\":{id},\"num\":{{\"i\":{k},\"pre\":{prefix}}}}}"

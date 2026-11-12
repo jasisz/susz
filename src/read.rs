@@ -1,10 +1,17 @@
-//! The reader: framing (header, trailer, directory), MAIN records as
-//! events, proof blocks by range, and the full structural check
-//! ([`verify`]). Every rule of spec sections 3-6 is checked; the first
-//! error is reported with its section, absolute byte offset and record
-//! number (spec section 8), the same whatever the order blocks are read in.
+//! The reader: framing (header, trailer, directory), MAIN records, proof
+//! blocks by range, and the full structural check ([`verify`]).
+//!
+//! [`decode`] is the way in for a checker: one pass over the file that hands
+//! each record to a [`Visit`] right after checking it, with a theorem's
+//! proof block decoded before the theorem, or left for [`decode_block`].
+//! [`verify`] is that same pass with a visitor that does nothing. The
+//! iterators ([`Main`], [`Block`]) check as they go as well.
+//!
+//! Every rule of spec sections 3-6 is checked; the first error is reported
+//! with its section, absolute byte offset and record number (spec section
+//! 8), the same whatever the order blocks are read in.
 
-use crate::canon::{Canon, Part};
+use crate::canon::Canon;
 use crate::format::{self, VarintError};
 use std::fmt;
 
@@ -216,6 +223,8 @@ impl fmt::Display for Failure {
         write!(f, "{} ({})", self.message, self.class.name())
     }
 }
+
+impl std::error::Error for Failure {}
 
 /// The result of a full structural check.
 #[derive(Debug, Clone)]
@@ -496,6 +505,14 @@ impl<'a> File<'a> {
 // ---------------------------------------------------------------------------
 // Decoded records
 
+/// A name component. A string component is borrowed from the file and is
+/// already checked to be well-formed UTF-8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Component<'a> {
+    Str(&'a str),
+    Num(u64),
+}
+
 /// A list of ids already checked, decoded on demand (through a frontier
 /// table inside a block).
 #[derive(Clone, Copy)]
@@ -710,7 +727,7 @@ pub enum Event<'a> {
     Name {
         id: u32,
         prefix: u32,
-        part: Part<'a>,
+        part: Component<'a>,
     },
     Level {
         id: u32,
@@ -806,34 +823,73 @@ fn verr(e: VarintError) -> E {
     }
 }
 
-/// A cursor over a section or block.
+/// A cursor over a section or block. `b` ends where the section or block
+/// ends; positions are absolute offsets in the file.
 struct Cur<'a> {
     b: &'a [u8],
     p: usize,
-    end: usize,
 }
 
+const HIGH: u64 = 0x8080_8080_8080_8080;
+
 impl<'a> Cur<'a> {
-    #[inline]
+    #[inline(always)]
+    fn left(&self) -> usize {
+        self.b.len() - self.p
+    }
+    /// A varint, with every rule of spec section 3.
+    #[inline(always)]
     fn v(&mut self) -> Result<u64, E> {
-        // fast path: one byte
-        if self.p < self.end {
-            let x = self.b[self.p];
+        if let Some(&x) = self.b.get(self.p) {
             if x < 0x80 {
                 self.p += 1;
                 return Ok(x as u64);
             }
         }
-        format::get_varint(self.b, &mut self.p, self.end).map_err(verr)
+        self.v_long()
     }
-    #[inline]
-    fn byte(&mut self) -> Result<u8, E> {
-        if self.p >= self.end {
-            return Err((Class::Truncated, "the record runs past the end".into()));
+    /// A varint of two bytes or more: up to eight bytes from one load,
+    /// the rest (and every error) through the plain decoder.
+    #[inline(always)]
+    fn v_long(&mut self) -> Result<u64, E> {
+        if let Some(w) = self.b.get(self.p..self.p + 8) {
+            let w = u64::from_le_bytes(w.try_into().unwrap());
+            let stop = !w & HIGH;
+            if stop != 0 {
+                // bytes in the varint, 1..=8; the first has its high bit set
+                let n = stop.trailing_zeros() / 8 + 1;
+                let last = (w >> (8 * (n - 1))) & 0xff;
+                if last != 0 {
+                    let x = if n == 8 {
+                        w
+                    } else {
+                        w & ((1u64 << (8 * n)) - 1)
+                    };
+                    // pack the 7-bit groups: pairs, quads, then all eight
+                    let x = (x & 0x007f_007f_007f_007f) | ((x & 0x7f00_7f00_7f00_7f00) >> 1);
+                    let x = (x & 0x0000_3fff_0000_3fff) | ((x & 0x3fff_0000_3fff_0000) >> 2);
+                    let x = (x & 0x0fff_ffff) | ((x & 0x0fff_ffff_0000_0000) >> 4);
+                    self.p += n as usize;
+                    return Ok(x);
+                }
+            }
         }
-        let x = self.b[self.p];
-        self.p += 1;
-        Ok(x)
+        self.v_slow()
+    }
+    #[cold]
+    #[inline(never)]
+    fn v_slow(&mut self) -> Result<u64, E> {
+        format::get_varint(self.b, &mut self.p, self.b.len()).map_err(verr)
+    }
+    #[inline(always)]
+    fn byte(&mut self) -> Result<u8, E> {
+        match self.b.get(self.p) {
+            Some(&x) => {
+                self.p += 1;
+                Ok(x)
+            }
+            None => Err((Class::Truncated, "the record runs past the end".into())),
+        }
     }
     fn boolean(&mut self) -> Result<bool, E> {
         match self.byte()? {
@@ -851,7 +907,7 @@ impl<'a> Cur<'a> {
     }
     fn bytes(&mut self) -> Result<&'a [u8], E> {
         let n = self.v()?;
-        if n > (self.end - self.p) as u64 {
+        if n > self.left() as u64 {
             return Err((Class::Truncated, "bytes run past the end".into()));
         }
         let s = &self.b[self.p..self.p + n as usize];
@@ -873,7 +929,7 @@ impl<'a> Cur<'a> {
     /// A list of ids each checked by `ok`.
     fn ids(&mut self, mut ok: impl FnMut(u64) -> Result<(), E>) -> Result<Ids<'a>, E> {
         let n = self.v()?;
-        if n > (self.end - self.p) as u64 {
+        if n > self.left() as u64 {
             return Err((Class::Truncated, "a list runs past the end".into()));
         }
         let start = self.p;
@@ -890,7 +946,7 @@ impl<'a> Cur<'a> {
     /// A count of parts; each part takes at least `min` bytes.
     fn count(&mut self, min: u64) -> Result<u64, E> {
         let n = self.v()?;
-        if n.saturating_mul(min) > (self.end - self.p) as u64 {
+        if n.saturating_mul(min) > self.left() as u64 {
             return Err((Class::Truncated, "parts run past the end".into()));
         }
         Ok(n)
@@ -930,18 +986,21 @@ impl<'a> Main<'a> {
         self.start
     }
 
+    #[inline(always)]
     fn name_id(&self, x: u64) -> Result<u32, E> {
         if x >= self.st.names as u64 {
             return Err((Class::NameId, format!("name {x} is not defined yet")));
         }
         Ok(x as u32)
     }
+    #[inline(always)]
     fn level_id(&self, x: u64) -> Result<u32, E> {
         if x >= self.st.levels as u64 {
             return Err((Class::LevelId, format!("level {x} is not defined yet")));
         }
         Ok(x as u32)
     }
+    #[inline(always)]
     fn back(&self, d: u64) -> Result<u32, E> {
         if d == 0 || d > self.st.exprs as u64 {
             return Err((
@@ -955,13 +1014,13 @@ impl<'a> Main<'a> {
         Ok(self.st.exprs - d as u32)
     }
 
-    fn new_name(&mut self, pre: u32, part: Part<'a>, off: u64) -> Result<u32, E> {
+    fn new_name(&mut self, pre: u32, part: Component<'a>, off: u64) -> Result<u32, E> {
         if self.st.names == u32::MAX {
             return Err((Class::Counts, "more than 2^32 - 1 names".into()));
         }
         let cp = self.st.name_canon[pre as usize];
         let c = match part {
-            Part::Str(s) => {
+            Component::Str(s) => {
                 // the name table keeps a component's length in a u32
                 if s.len() as u64 >= crate::canon::MAX_COMPONENT {
                     return Err((
@@ -975,7 +1034,7 @@ impl<'a> Main<'a> {
                 }
                 self.st.canon.str_id(self.bytes, cp, off, s.len() as u32)
             }
-            Part::Num(k) => self.st.canon.num_id(cp, k),
+            Component::Num(k) => self.st.canon.num_id(cp, k),
         };
         if c as usize == self.st.canon_decl.len() {
             self.st.canon_decl.push(NONE);
@@ -1037,6 +1096,7 @@ impl<'a> Main<'a> {
         })
     }
 
+    #[inline(always)]
     fn record(&mut self, c: &mut Cur<'a>) -> Result<Event<'a>, E> {
         let at = c.p as u64;
         let tag = c.byte()?;
@@ -1044,12 +1104,11 @@ impl<'a> Main<'a> {
             1 | 2 => {
                 let pre = self.name_id(c.v()?)?;
                 let part = if tag == 1 {
-                    let s = c.string()?;
-                    Part::Str(s.as_bytes())
+                    Component::Str(c.string()?)
                 } else {
-                    Part::Num(c.v()?)
+                    Component::Num(c.v()?)
                 };
-                let off = if let Part::Str(s) = part {
+                let off = if let Component::Str(s) = part {
                     (c.p - s.len()) as u64
                 } else {
                     0
@@ -1407,9 +1466,8 @@ impl<'a> Iterator for Main<'a> {
         let at = self.p;
         self.rec += 1;
         let mut c = Cur {
-            b: self.bytes,
+            b: &self.bytes[..self.end],
             p: self.p,
-            end: self.end,
         };
         match self.record(&mut c) {
             Ok(ev) => {
@@ -1477,6 +1535,7 @@ impl<'a> Block<'a> {
         f
     }
 
+    #[inline(always)]
     fn fname(&self, x: u64) -> Result<u32, E> {
         if x >= self.b.frontier[0] as u64 {
             return Err((
@@ -1486,6 +1545,7 @@ impl<'a> Block<'a> {
         }
         Ok(self.st.frontier[0][x as usize])
     }
+    #[inline(always)]
     fn flevel(&self, x: u64) -> Result<u32, E> {
         if x >= self.b.frontier[1] as u64 {
             return Err((
@@ -1495,15 +1555,16 @@ impl<'a> Block<'a> {
         }
         Ok(self.st.frontier[1][x as usize])
     }
-    fn eref(&self, r: u64) -> Result<Ref, E> {
+    #[inline(always)]
+    fn eref(&self, r: u64, k: u64) -> Result<Ref, E> {
         if r == 0 {
             return Err((Class::BackDistance, "reference 0".into()));
         }
-        if r <= self.k {
+        if r <= k {
             // k < block-exprs <= MAX_BLOCK_EXPRS, checked in the record
-            return Ok(Ref::Block((self.k - r) as u32));
+            return Ok(Ref::Block((k - r) as u32));
         }
-        let f = r - self.k - 1;
+        let f = r - k - 1;
         if f >= self.b.frontier[2] as u64 {
             return Err((
                 Class::FrontierIndex,
@@ -1530,6 +1591,11 @@ impl<'a> Block<'a> {
     }
 
     fn record(&self, c: &mut Cur<'a>) -> Result<Expr<'a>, E> {
+        self.record_at(c, self.k)
+    }
+
+    #[inline(always)]
+    fn record_at(&self, c: &mut Cur<'a>, k: u64) -> Result<Expr<'a>, E> {
         let tag = c.byte()?;
         Ok(match tag {
             7 => Expr::BVar(c.v()?),
@@ -1552,14 +1618,14 @@ impl<'a> Block<'a> {
                 Expr::Const(n, us)
             }
             10 => {
-                let f = self.eref(c.v()?)?;
-                Expr::App(f, self.eref(c.v()?)?)
+                let f = self.eref(c.v()?, k)?;
+                Expr::App(f, self.eref(c.v()?, k)?)
             }
             11 | 12 => {
                 let bi = c.enm(3, "binder")?;
                 let n = self.fname(c.v()?)?;
-                let t = self.eref(c.v()?)?;
-                let b = self.eref(c.v()?)?;
+                let t = self.eref(c.v()?, k)?;
+                let b = self.eref(c.v()?, k)?;
                 if tag == 11 {
                     Expr::Lam(bi, n, t, b)
                 } else {
@@ -1568,9 +1634,9 @@ impl<'a> Block<'a> {
             }
             13 => {
                 let n = self.fname(c.v()?)?;
-                let t = self.eref(c.v()?)?;
-                let v = self.eref(c.v()?)?;
-                Expr::Let(n, t, v, self.eref(c.v()?)?)
+                let t = self.eref(c.v()?, k)?;
+                let v = self.eref(c.v()?, k)?;
+                Expr::Let(n, t, v, self.eref(c.v()?, k)?)
             }
             14 => Expr::Nat(c.nat()?),
             15 => Expr::Str(c.string()?),
@@ -1578,7 +1644,7 @@ impl<'a> Block<'a> {
                 let n = self.fname(c.v()?)?;
                 self.placed(n)?;
                 let i = c.v()?;
-                Expr::Proj(n, i, self.eref(c.v()?)?)
+                Expr::Proj(n, i, self.eref(c.v()?, k)?)
             }
             t => return Err((Class::Tag, format!("tag {t} in a proof block"))),
         })
@@ -1618,9 +1684,8 @@ impl<'a> Iterator for Block<'a> {
             )));
         }
         let mut c = Cur {
-            b: self.bytes,
+            b: &self.bytes[..self.end],
             p: self.p,
-            end: self.end,
         };
         match self.record(&mut c) {
             Ok(e) => {
@@ -1638,10 +1703,288 @@ impl<'a> Iterator for Block<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Single-pass decoding
+
+/// What a caller does with the records of a single-pass [`decode`]. Every
+/// method is called only after its record passed every check up to that
+/// point, so the caller does not need to check anything the format promises.
+/// The defaults do nothing. An error from the caller stops the pass.
+pub trait Visit<'a> {
+    type Error;
+    /// A name record (`id` from 1; 0 is the anonymous name).
+    fn name(&mut self, id: u32, prefix: u32, part: Component<'a>) -> Result<(), Self::Error> {
+        let _ = (id, prefix, part);
+        Ok(())
+    }
+    /// A level record (`id` from 1; 0 is the zero level).
+    fn level(&mut self, id: u32, level: Level) -> Result<(), Self::Error> {
+        let _ = (id, level);
+        Ok(())
+    }
+    /// A MAIN expression.
+    fn expr(&mut self, id: u32, expr: &Expr<'a>) -> Result<(), Self::Error> {
+        let _ = (id, expr);
+        Ok(())
+    }
+    /// A frontier entry: `kind` 0 name, 1 level, 2 expression.
+    fn frontier(&mut self, kind: u8, index: u32, item: u32) -> Result<(), Self::Error> {
+        let _ = (kind, index, item);
+        Ok(())
+    }
+    /// A theorem with a proof block was read, before its [`Visit::decl`].
+    /// `true` decodes the block now: its expressions go to
+    /// [`Visit::block_expr`], then the declaration follows. `false` leaves the
+    /// block for later, through [`decode_block`].
+    fn open_block(&mut self, block: &BlockRef) -> bool {
+        let _ = block;
+        true
+    }
+    /// The `k`-th expression of the block being decoded (from 0). The last
+    /// one is the theorem's value.
+    fn block_expr(&mut self, k: u32, expr: &Expr<'_>) -> Result<(), Self::Error> {
+        let _ = (k, expr);
+        Ok(())
+    }
+    /// A declaration record. `offset` is the absolute offset of its tag byte.
+    fn decl(&mut self, index: u32, offset: u64, decl: &Decl<'a>) -> Result<(), Self::Error> {
+        let _ = (index, offset, decl);
+        Ok(())
+    }
+}
+
+/// Why a [`decode`] stopped.
+#[derive(Debug)]
+pub enum Stop<E> {
+    /// The file failed a check: rejected or declined, see [`Failure::outcome`].
+    File(Failure),
+    /// The caller stopped the pass.
+    Visitor(E),
+}
+
+/// The end of a [`decode`] that ran to the end of MAIN.
+pub struct Decoded {
+    /// What MAIN defined: the frontier tables and names needed to decode
+    /// the blocks left for later.
+    pub state: State,
+    /// What the file holds. `block_exprs` counts the expressions every
+    /// block declares, decoded or not.
+    pub summary: Summary,
+    /// Blocks left for later ([`Visit::open_block`] said no). They are not
+    /// checked yet: a reader says the file is accepted only once each of
+    /// them is decoded without an error.
+    pub unread: u64,
+}
+
+impl Failure {
+    /// The outcome this failure gives: declined for a decline, rejected
+    /// otherwise.
+    pub fn outcome(self) -> Outcome {
+        Outcome::of(self)
+    }
+}
+
+/// Decodes a file in one pass, every check inline. MAIN's records go to the
+/// visitor in file order, and each proof block the visitor opens is decoded
+/// at its theorem's record, before the declaration itself.
+///
+/// The reported failure is the one [`verify`] reports (spec section 8): a
+/// structural error in MAIN, the trailer counts or the PROOFS fill comes
+/// before any error inside a block. So after an error inside a block the
+/// pass stops calling the visitor, but still checks the rest of MAIN, and
+/// reports the block's error only if MAIN has none. A visitor that stopped
+/// early must expect events up to the failing record of a block.
+///
+/// ```no_run
+/// use susz::read::{decode, Expr, File, Visit};
+///
+/// struct Count(u64);
+///
+/// impl<'a> Visit<'a> for Count {
+///     type Error = ();
+///     fn expr(&mut self, _id: u32, _e: &Expr<'a>) -> Result<(), ()> {
+///         self.0 += 1;
+///         Ok(())
+///     }
+///     fn block_expr(&mut self, _k: u32, _e: &Expr<'_>) -> Result<(), ()> {
+///         self.0 += 1;
+///         Ok(())
+///     }
+/// }
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let bytes = std::fs::read("Init.susz")?;
+/// let file = File::open(&bytes)?;
+/// let mut count = Count(0);
+/// match decode(&file, &mut count) {
+///     Ok(_) => println!("{} expressions", count.0),
+///     Err(e) => println!("{e:?}"),
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub fn decode<'a, V: Visit<'a>>(file: &File<'a>, v: &mut V) -> Result<Decoded, Stop<V::Error>> {
+    file.main().run(v)
+}
+
+/// Decodes one proof block with every check inline, calling `f` with each
+/// expression's index in the block and the expression. `st` is the state
+/// of a [`decode`] that has read at least the theorem's record.
+pub fn decode_block<'a, E>(
+    bytes: &'a [u8],
+    st: &'a State,
+    block: BlockRef,
+    mut f: impl FnMut(u32, &Expr<'a>) -> Result<(), E>,
+) -> Result<(), Stop<E>> {
+    Block::new(bytes, st, block).run(&mut f)
+}
+
+impl<'a> Main<'a> {
+    fn run<V: Visit<'a>>(mut self, v: &mut V) -> Result<Decoded, Stop<V::Error>> {
+        let mut c = Cur {
+            b: &self.bytes[..self.end],
+            p: self.p,
+        };
+        let mut sum = Summary {
+            counts: self.counts,
+            ..Default::default()
+        };
+        let mut unread = 0;
+        // the first error inside a block, reported after MAIN is checked
+        let mut late: Option<Failure> = None;
+        while c.p < c.b.len() {
+            let at = c.p;
+            self.rec += 1;
+            let ev = match self.record(&mut c) {
+                Ok(ev) => ev,
+                Err((class, msg)) => {
+                    return Err(Stop::File(Failure::new(
+                        class,
+                        Place::Section(format::SEC_MAIN),
+                        at as u64,
+                        self.rec,
+                        msg,
+                    )))
+                }
+            };
+            if late.is_some() {
+                continue;
+            }
+            let r = match ev {
+                Event::Name { id, prefix, part } => v.name(id, prefix, part),
+                Event::Level { id, level } => v.level(id, level),
+                Event::Expr { id, expr } => v.expr(id, &expr),
+                Event::Frontier { kind, index, item } => v.frontier(kind, index, item),
+                Event::Decl {
+                    index,
+                    offset,
+                    decl,
+                } => {
+                    if let Decl::ThmBlock { block, .. } = &decl {
+                        sum.blocks += 1;
+                        sum.block_exprs += block.exprs;
+                        if v.open_block(block) {
+                            let b = Block::new(self.bytes, &self.st, *block);
+                            match b.run(&mut |k, e: &Expr<'_>| v.block_expr(k, e)) {
+                                Ok(()) => {}
+                                Err(Stop::File(f)) => {
+                                    late = Some(f);
+                                    continue;
+                                }
+                                Err(Stop::Visitor(e)) => return Err(Stop::Visitor(e)),
+                            }
+                        } else {
+                            unread += 1;
+                        }
+                    }
+                    v.decl(index, offset, &decl)
+                }
+            };
+            r.map_err(Stop::Visitor)?;
+        }
+        self.p = c.p;
+        self.finish().map_err(Stop::File)?;
+        if let Some(f) = late {
+            return Err(Stop::File(f));
+        }
+        sum.frontier = [
+            self.st.frontier[0].len() as u64,
+            self.st.frontier[1].len() as u64,
+            self.st.frontier[2].len() as u64,
+        ];
+        Ok(Decoded {
+            state: self.st,
+            summary: sum,
+            unread,
+        })
+    }
+}
+
+impl<'a> Block<'a> {
+    /// The whole block through `f`, with the same checks and failures as
+    /// the iterator.
+    fn run<E>(self, f: &mut impl FnMut(u32, &Expr<'a>) -> Result<(), E>) -> Result<(), Stop<E>> {
+        let mut c = Cur {
+            b: &self.bytes[..self.end],
+            p: self.p,
+        };
+        let mut k = 0u64;
+        while k < self.b.exprs {
+            let at = c.p;
+            if at >= self.end {
+                return Err(Stop::File(self.fail(
+                    Class::BlockCount,
+                    at as u64,
+                    k + 1,
+                    format!("the block ends after {k} of {} expressions", self.b.exprs),
+                )));
+            }
+            match self.record_at(&mut c, k) {
+                // k < block-exprs <= MAX_BLOCK_EXPRS, checked in the record
+                Ok(e) => f(k as u32, &e).map_err(Stop::Visitor)?,
+                Err((class, msg)) => {
+                    return Err(Stop::File(self.fail(class, at as u64, k + 1, msg)))
+                }
+            }
+            k += 1;
+        }
+        if c.p != self.end {
+            return Err(Stop::File(self.fail(
+                Class::BlockCount,
+                c.p as u64,
+                k + 1,
+                format!("bytes left after {} expressions", self.b.exprs),
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// The full structural check of a file (spec section 10): framing, every MAIN
-/// record, the counts and PROOFS fill, then every proof block in
-/// declaration order. INDEX is not read (its directory entry is checked).
+/// record, the counts and PROOFS fill, and every proof block. INDEX is not
+/// read (its directory entry is checked). This is [`decode`] with a visitor
+/// that only opens every block.
 pub fn verify(bytes: &[u8]) -> Outcome {
+    struct Check;
+    impl Visit<'_> for Check {
+        type Error = std::convert::Infallible;
+    }
+    let f = match File::open(bytes) {
+        Ok(f) => f,
+        Err(e) => return Outcome::of(e),
+    };
+    match decode(&f, &mut Check) {
+        Ok(d) => Outcome::Accepted(d.summary),
+        Err(Stop::File(e)) => Outcome::of(e),
+        Err(Stop::Visitor(x)) => match x {},
+    }
+}
+
+/// The check as two passes: all of MAIN through the iterator, then every
+/// block in declaration order. Kept to show that [`verify`] gives the same
+/// outcome and location.
+#[doc(hidden)]
+pub fn verify_two_pass(bytes: &[u8]) -> Outcome {
     let f = match File::open(bytes) {
         Ok(f) => f,
         Err(e) => return Outcome::of(e),

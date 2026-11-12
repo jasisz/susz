@@ -4,10 +4,11 @@
 //! from a Susz file ([`of_susz`]) and from an ndjson export ([`of_ndjson`]),
 //! for differential tests.
 
-use crate::canon::Part;
 use crate::format;
 use crate::pack::json::{self, J};
-use crate::read::{Block, Decl, Event, Expr, Failure, File, Head, Hints, Ids, Level, Ref};
+use crate::read::{
+    Block, Component, Decl, Event, Expr, Failure, File, Head, Hints, Ids, Level, Ref,
+};
 use std::collections::HashMap;
 use std::io::BufRead;
 
@@ -57,8 +58,8 @@ pub fn of_susz(bytes: &[u8]) -> Result<u64, Failure> {
             Event::Name { prefix, part, .. } => {
                 let p = names[prefix as usize];
                 names.push(match part {
-                    Part::Str(s) => h(1, &[p, hb(s)]),
-                    Part::Num(k) => h(2, &[p, k]),
+                    Component::Str(s) => h(1, &[p, hb(s.as_bytes())]),
+                    Component::Num(k) => h(2, &[p, k]),
                 });
             }
             Event::Level { level, .. } => levels.push(level_h(level, &levels, &names)),
