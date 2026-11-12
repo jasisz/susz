@@ -5,6 +5,10 @@
 
 /// Canonical id of the anonymous name.
 pub const ANON: u32 = 0;
+/// A string component must be shorter than this many bytes: its length is
+/// kept in a u32, and the two top values mark numeric components and the
+/// anonymous name.
+pub const MAX_COMPONENT: u64 = u32::MAX as u64 - 1;
 const NUM: u32 = u32::MAX;
 
 pub struct Canon {
@@ -132,6 +136,69 @@ impl Canon {
             self.grow();
         }
         id
+    }
+    /// The canonical id of the name with canonical prefix `pre` and
+    /// component `part`, if the table holds it. Nothing is added.
+    pub fn find(&self, src: &[u8], pre: u32, part: Part) -> Option<u32> {
+        let (h, len, k) = match part {
+            Part::Str(s) => {
+                if s.len() as u64 >= MAX_COMPONENT {
+                    return None;
+                }
+                (hash_str(pre, s), s.len() as u32, 0)
+            }
+            Part::Num(k) => (hash_num(pre, k), NUM, k),
+        };
+        let mut i = h as usize & self.mask;
+        loop {
+            let id = self.slots[i];
+            if id == 0 {
+                return None;
+            }
+            let x = id as usize;
+            if self.hash[x] == h && self.pre[x] == pre && self.len[x] == len {
+                let same = match part {
+                    Part::Num(_) => self.off[x] == k,
+                    Part::Str(s) => {
+                        let o = self.off[x] as usize;
+                        &src[o..o + len as usize] == s
+                    }
+                };
+                if same {
+                    return Some(id);
+                }
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
+    /// The canonical id of the name whose INDEX key is `key`, if the table
+    /// holds it. A malformed key (an unknown component tag, a varint that is
+    /// not minimal, a component cut short), and the empty key, give `None`.
+    pub fn find_key(&self, src: &[u8], key: &[u8]) -> Option<u32> {
+        if key.is_empty() {
+            return None;
+        }
+        let mut c = ANON;
+        let mut p = 0usize;
+        while p < key.len() {
+            let t = key[p];
+            p += 1;
+            let v = crate::format::get_varint(key, &mut p, key.len()).ok()?;
+            let part = match t {
+                1 => {
+                    if v > (key.len() - p) as u64 {
+                        return None;
+                    }
+                    let s = &key[p..p + v as usize];
+                    p += v as usize;
+                    Part::Str(s)
+                }
+                2 => Part::Num(v),
+                _ => return None,
+            };
+            c = self.find(src, c, part)?;
+        }
+        Some(c)
     }
     /// The component of canonical name `c` (not the anonymous name).
     pub fn part<'a>(&self, src: &'a [u8], c: u32) -> Part<'a> {

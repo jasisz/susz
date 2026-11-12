@@ -3,13 +3,43 @@
 // the ndjson, read independently), unpacks to an export that packs to the
 // same bytes, and its INDEX verifies. Packer exit classes on broken inputs.
 //
-// The corpora live outside the repository: SUSZ_CORPORA (default
-// ~/pestka-corpora). init-prelude runs by default (skipped when absent);
-// Init is #[ignore]: cargo test --release -- --ignored
+// init-prelude is in the repository (tests/corpus/, gzipped) and always
+// runs. The larger corpora live outside it: SUSZ_CORPORA (default
+// ~/pestka-corpora), and are skipped when absent. Init is #[ignore]:
+// cargo test --release -- --ignored. With SUSZ_REQUIRE_CORPORA=1 (as in CI)
+// a missing init-prelude fails instead of skipping.
 
+use std::io::Read;
 use std::path::PathBuf;
 use susz::pack::{pack_to_vec, Fault, Options};
 
+fn required() -> bool {
+    std::env::var("SUSZ_REQUIRE_CORPORA").is_ok_and(|v| v == "1")
+}
+
+// The committed init-prelude, unzipped once per test process.
+fn init_prelude() -> Option<String> {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let gz =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/init-prelude.ndjson.gz");
+        let Ok(f) = std::fs::File::open(&gz) else {
+            assert!(!required(), "{} is missing", gz.display());
+            eprintln!("skipped: {} not found", gz.display());
+            return None;
+        };
+        let mut text = Vec::new();
+        flate2::read::GzDecoder::new(f)
+            .read_to_end(&mut text)
+            .unwrap();
+        let out = tmp(&format!("init-prelude-{}.ndjson", std::process::id()));
+        std::fs::write(&out, &text).unwrap();
+        Some(out)
+    })
+    .clone()
+}
+
+// A corpus from SUSZ_CORPORA; skipped when absent.
 fn corpus(name: &str) -> Option<String> {
     let dir = std::env::var("SUSZ_CORPORA")
         .map(PathBuf::from)
@@ -87,10 +117,15 @@ fn check_export(path: &str, tag: &str, threads: &[usize]) {
     let f = susz::read::File::open(&with).unwrap();
     susz::index::verify_index(&f).unwrap();
     let ix = susz::index::parse(&f).unwrap();
-    let step = (ix.names.len() / 50).max(1);
-    for (k, d) in ix.names.iter().step_by(step).take(60) {
-        let x = susz::index::lookup(&f, k).unwrap();
-        assert_eq!(x.decl, *d);
+    assert!(ix.expanded());
+    let scan = susz::index::parse_capped(&f, 0).unwrap();
+    let mut many = susz::index::Lookup::new(&f).unwrap();
+    let step = (ix.len() / 50).max(1);
+    for j in (0..ix.len()).step_by(step).take(60) {
+        let (k, d) = (ix.key(j), ix.decl(j));
+        assert_eq!(scan.find(&k), Some(d));
+        assert_eq!(susz::index::lookup(&f, &k).unwrap().decl, d);
+        assert_eq!(many.find(&k).unwrap().decl, d);
     }
     // unpack, pack again: the same bytes
     let nd = tmp(&format!("{tag}.unpacked.ndjson"));
@@ -107,8 +142,8 @@ fn check_export(path: &str, tag: &str, threads: &[usize]) {
 }
 
 #[test]
-fn init_prelude() {
-    if let Some(p) = corpus("init-prelude.ndjson") {
+fn init_prelude_packs() {
+    if let Some(p) = init_prelude() {
         check_export(&p, "init-prelude", &[2, 4, 8]);
     }
 }
@@ -125,7 +160,7 @@ fn init() {
 // does not understand is Cannot (exit 2).
 #[test]
 fn broken_inputs() {
-    let Some(p) = corpus("init-prelude.ndjson") else {
+    let Some(p) = init_prelude() else {
         return;
     };
     let text = std::fs::read_to_string(&p).unwrap();

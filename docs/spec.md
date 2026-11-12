@@ -11,10 +11,11 @@ versions (0, 1 and 2) are not Susz 1, and a Susz 1 reader does not read them.
 
 MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
-Sections 1 to 10 are normative. Section 11 describes the test vectors. Appendix A lists the choices we made and
-why. The text refers to them as A.1 to A.14. Appendix B lists the changes
-from internal version 2. [`OPEN.md`](OPEN.md) lists questions that came up
-while implementing, with the answers the reference crate follows.
+Sections 1 to 10 are normative. Section 11 describes the test vectors.
+Appendix A lists the choices we made and why. The text refers to them as A.1
+to A.14. Appendix B lists the changes from internal version 2.
+[`OPEN.md`](OPEN.md) tells which questions came up while implementing. Their
+answers are now part of the sections below.
 
 ## 1. Rules
 
@@ -42,14 +43,31 @@ while implementing, with the answers the reference crate follows.
 
 A reader gives exactly one of three outcomes.
 
-- **accepted**: the file is well-formed. For a checker, every declaration was
-  also admitted.
-- **rejected**: the file is malformed (a *structural error*), or a
-  declaration fails.
+- **accepted**: the file is well-formed and no declaration fails. For a
+  checker, every declaration was also admitted.
+- **rejected**: the file is malformed, or a declaration fails.
 - **declined**: the reader cannot judge the file. Either the file needs a
   feature the reader does not implement (an unknown major version, an unknown
   must-understand section), or it goes past one of the reader's own
   implementation limits (section 7.2). Declined is not a verdict on the file.
+
+A file can fail in three ways.
+
+1. A **structural error** means the file is malformed. It breaks a MUST of
+   sections 3 to 6 or a "MUST equal" check of section 4, other than rule P.
+   Bad INDEX content (section 6a) never is one. A file with no structural
+   error is **well-formed**. A packer MUST write only well-formed files
+   (section 9).
+2. A **declaration failure found without types** is the failure of one
+   declaration that a reader sees in the records alone. Susz 1 has one such
+   rule, rule P (section 6). The file is still well-formed. The failure comes
+   from the export, and a packer writes it as it is.
+3. A **kernel failure** is the failure of one declaration that a checker
+   finds by type checking. A reader that only checks structure does not look
+   for these.
+
+A reader reports a failure of kind 2 or 3 as the failure of that
+declaration, not as a malformed file. The outcome is still rejected.
 
 A *subset check* (section 6a.2) has a fourth outcome, **index invalid**. It
 means an INDEX entry the check relied on disagrees with the records. It ends
@@ -57,8 +75,9 @@ that subset check only. It is never a verdict on the file.
 
 A structural error in the header, the directory, the trailer or the MAIN
 section rejects the file before any declaration is checked. A structural
-error inside a proof block is an error of that block's theorem. It is ordered
-with the other declaration failures (section 8).
+error inside a proof block also makes the file malformed. But a lazy reader
+only sees it when it decodes the block, so it is ordered with the failures of
+that block's theorem (section 8).
 
 ## 3. Encoding primitives
 
@@ -236,17 +255,28 @@ The remaining fields:
   varint, numMotives: varint, numMinors: varint, rules, k: bool. The rules are
   a varint count, then that many of (ctor: name, nfields: varint, rhs: back).
 
-**Unique declared names (A.8).** A declaration record declares its head name.
-An inductive block declares every type, constructor and recursor name in it.
-A name a record declares MUST NOT be declared by an earlier declaration
-record, or earlier in the same record. A violation is a structural error at
-that record. A name's **declaration index** is the index of the record that
-declares it.
+**Name equality.** MAIN may hold two name records for the same name. Two
+names are equal when both are the anonymous name, or when their prefixes are
+equal and their last components are equal (the same string bytes, or the
+same number). Unique declared names, rule P and INDEX keys all compare names
+this way, never by name id.
+
+**Declared names (A.8).** A declaration record declares its head name. An
+inductive block declares every type, constructor and recursor name in it.
+
+- A name a record declares MUST NOT be the anonymous name.
+- A name a record declares MUST NOT be declared by an earlier declaration
+  record, or earlier in the same record.
+
+A violation of either is a structural error at that record. A name's
+**declaration index** is the index of the record that declares it.
 
 Kind 6: `block-length` is the byte length of the theorem's proof block.
 `block-exprs` is the number of expression records in it. `1 <= block-exprs
 <= block-length / 2` MUST hold, since an expression record takes at least 2
-bytes (A.4).
+bytes (A.4). `block-exprs <= 2^32 − 1` MUST hold too (section 7.1). A reader
+checks both in the record, before it decodes any block, so the result is the
+same for eager and lazy decoding.
 
 ## 6. PROOFS section
 
@@ -272,9 +302,11 @@ Inside the block of theorem `T`:
   Otherwise it names frontier expression `r − k − 1`, which MUST be below the
   number of frontier expression entries listed before `T`.
 - **Declared before (rule P).** The name of every `const` and every `proj`
-  record in the block MUST have a declaration index below `T`'s. A violation
-  is an error of `T`, like any other structural error of the block
-  (section 8). There are no marks and no `placed` flag (Appendix A, R6).
+  record in the block MUST have a declaration index below `T`'s. Names are
+  compared by value (section 5.2). A violation is a declaration failure of
+  `T`, not a structural error (section 2). It is found in byte order
+  together with the structural errors of the block (section 8). There are no
+  marks and no `placed` flag (Appendix A, R6).
 
 ## 6a. INDEX section
 
@@ -316,6 +348,12 @@ component  = 01 len:varint utf8-bytes      ; string component
 - Keys are the names themselves, not hashes, so rule 1 ("no hashes") holds.
   A lookup is a binary search over the decoded table, or a linear scan of the
   front-coded bytes.
+- Expanded keys can be much larger than INDEX. A chain of names `a`, `a.a`,
+  `a.a.a` and so on expands to a size that grows with the square of the
+  section's length. A reader MUST still keep within section 10, item 4. The
+  reference reader keeps expanded keys only while their total stays below 8
+  bytes per INDEX byte (mathlib needs about 2.6), and scans the front-coded
+  table past that. Both give the same answers.
 
 ### 6a.2 What a subset checker gets, and what it still must read
 
@@ -323,6 +361,11 @@ With INDEX, finding `Foo.bar` takes reading INDEX only, not MAIN or PROOFS.
 It gives declaration i, its record offset, its kind and, for a theorem with a
 block, the block's byte range. Each namespace `Foo` is one contiguous run of
 the sorted table, because the keys of `Foo.*` start with the key of `Foo`.
+
+So the cost of one lookup is decoding INDEX, one binary search, and the MAIN
+prefix up to the declaration (see below). The search is the cheap step. A
+reader that does many lookups decodes INDEX once and keeps its MAIN reader's
+state between them. Then lookups in declaration order read MAIN once in all.
 
 A subset checker never decodes proof blocks other than those of the
 declarations it checks. INDEX does not save it the following work.
@@ -376,9 +419,12 @@ from the verdict.
 - Each of the four counts is at most 2^32 − 1, so every id fits a u32 in any
   implementation (A.3). Mathlib today has 105 M expressions, about 40× below
   the limit.
+- `block-exprs` is at most 2^32 − 1 as well, so an expression's index inside
+  its block fits a u32 too. Breaking it is a structural error at the kind-6
+  record (section 5.2).
 - Every other quantity is bounded only by the u64 range of varints and by the
   file's bytes. There is no format limit on record size, string or literal
-  length, block length or block expression count.
+  length, or block length.
 
 ### 7.2 Implementation limits
 
@@ -393,43 +439,91 @@ declaration still makes the file rejected.
 
 Readers SHOULD document their limits. Examples are a cap on a block's
 expression count, which `block-exprs` shows before checking starts, or a cap
-on a literal's size. A limit that depends on buffering, such as a record that
+on a literal's size. The reference reader has one: a string component of a
+name must be shorter than 2^32 − 2 bytes. A limit that depends on buffering, such as a record that
 crosses a chunk boundary, does not depend only on the file bytes. A reader
 reads such a record on a slow path instead.
 
 ## 8. Errors
 
-A reader reports a structural error with:
+A reader reports a structural error or a declaration failure found without
+types with:
 
 - the section, or `header`, `directory` or `trailer`;
 - the **absolute byte offset of the first byte of the offending record**, or
   of the field for header, trailer and directory errors;
-- the record's number within its section or block, from 1;
+- the record's number within its section or block, from 1 (for the
+  directory, the entry's number from 1; 0 where there is no record);
 - for a proof block, the theorem's name.
 
 Example: `PROOFS @ 18,342,117: block of Foo.bar, record 12: frontier name
 9001 not listed before the declaration`.
 
-A reader looks for structural errors in this order: the header, then the
-trailer and directory, then the MAIN records in file order. It reports the
-first error it finds, before any declaration is checked.
+### 8.1 Before any declaration
+
+A reader looks for structural errors in this order and reports the first one
+it finds.
+
+1. The header: magic, length, major (a decline), the reserved fields.
+2. The trailer: end magic, the range of the trailer length, the trailer
+   length against the section count.
+3. The directory, entry by entry: the reserved field, the flag bits, the
+   flags of a known id, a duplicate id, the start offset (tiling), the end
+   within the body. Then a gap before the trailer, then a missing MAIN. Only
+   then a decline for an unknown must-understand section, the first one in
+   directory order. So a file with a malformed directory is rejected, even
+   if it also needs an unknown section.
+4. PAD's all-zero rule, at the first non-zero byte.
+5. The MAIN records, in file order. Inside one record, the first broken
+   field in byte order. A declared name is checked for being anonymous or
+   declared twice when its name field is read, before the fields after it.
+   A kind-6 record whose block would run past the end of PROOFS, or that has
+   no PROOFS section at all, is an error at that record, of class
+   `proofs-fill`.
+6. After the last MAIN record, the trailer counts: the first one that
+   differs from what MAIN defines (names, levels, expressions,
+   declarations), at that count. Before this point a reader uses the counts
+   only as allocation hints, capped by MAIN's length.
+7. Then the rest of the PROOFS fill. A PROOFS section with no kind-6 record
+   (even of length 0) is an error at its first byte. A PROOFS section longer
+   than its blocks is an error at the first byte after the last block.
+
+Header, trailer, PAD, counts and PROOFS fill errors have record number 0.
+
+### 8.2 Declarations
 
 After that come declaration failures, in declaration order. The earliest one
 is reported. Within one declaration, the order is:
 
 1. failures to build it (universe parameters named twice),
-2. the structural error of its block,
-3. failures of checking.
+2. the errors of its block, in byte order: its structural errors and rule P
+   alike,
+3. kernel failures.
+
+A block with the wrong number of records gives one of these:
+
+- fewer records than `block-exprs`: class `block-count` at the block's end,
+  with record number = records found + 1;
+- bytes left after `block-exprs` records: class `block-count` at the first
+  byte left, with record number `block-exprs` + 1;
+- a record cut off by the block's end: class `truncated` at the record's
+  start.
 
 The conformance suite pins the outcome, the error class, the section and the
-record offset of each structural error. Messages stay free text (A.12).
+record offset of each error. Messages stay free text (A.12).
 
 ## 9. Packing (normative for canonical packers)
 
-A packer MUST write only files that a conformant reader accepts, and MUST be
-deterministic. Any accepted layout is a valid Susz file. A simple packer MAY
-put every expression in MAIN and write no kind-6 declaration and no PROOFS
-section.
+A packer MUST write only well-formed files (section 2), and MUST be
+deterministic. Any well-formed layout is a valid Susz file. A simple packer
+MAY put every expression in MAIN and write no kind-6 declaration and no
+PROOFS section.
+
+A packer writes every export it can represent. It does not fix or hide the
+export's own failures. If a theorem's proof names a constant declared after
+the theorem, the canonical file breaks rule P in that theorem's block. The
+packer writes it, and a reader reports that theorem's failure. An export
+that no well-formed file can hold is refused (section 9.2).
 
 A **canonical** packer writes exactly the layout below, so any two canonical
 packers produce identical bytes.
@@ -470,12 +564,42 @@ them.
 Everything else in a lean4export 3.1 record is kept. A packer MUST refuse an
 export record or field it does not know. It never drops one silently.
 
+### 9.2 Packer input (normative)
+
+A packer reads lean4export 3.1 ndjson, one JSON object per line. Two packers
+that write the same bytes must also agree on which inputs they pack, so the
+accepted dialect is fixed here.
+
+- The first line MUST be exactly `{"meta":M}`. M is kept byte for byte as
+  SOURCE. Its `format.version` MUST be 3.1.x.
+- Integers are non-negative. Leading zeros are allowed.
+- Strings may hold raw control characters.
+- An object may end with a trailing comma. An array may not.
+- Every other line is one record with exactly the keys of its lean4export
+  3.1 kind.
+
+A packer refuses an input in one of two classes. The `susz` tool exits with
+1 or 2.
+
+- **Not a valid export** (exit 1). The input breaks lean4export's own rules,
+  or no well-formed file can hold it. Examples are malformed JSON, a line cut
+  short, a missing or repeated key, a negative number, an id defined twice or
+  used before it is defined, a name declared twice (compared by value), a
+  declaration of the anonymous name, and an empty input.
+- **Cannot pack** (exit 2). The input may be a fine export, but this packer
+  cannot write it. Examples are a header in another form, another
+  `format.version`, a record kind or key outside lean4export 3.1, a number
+  that does not fit a u64 (a `Name.num` component, a bound variable index, a
+  projection index), more than 2^32 − 1 names, levels, expressions or
+  declarations, a packer's own limit, and I/O errors.
+
 ## 10. Conformance
 
 A conformant **reader** MUST:
 
 1. reject every file that breaks a MUST of sections 3-6 or a "MUST equal"
-   check of section 4, and locate the error as in section 8;
+   check of section 4, and locate the error as in section 8. A rule P
+   violation is reported as a declaration failure (section 2);
 2. accept every file that satisfies them (a checker goes on to check it),
    unless it declines for a documented implementation limit or an unknown
    must-understand section;
@@ -487,10 +611,11 @@ A conformant **reader** MUST:
    length. A subset check MUST verify every INDEX entry it relies on, and
    report "index invalid" on a mismatch (section 6a.3).
 
-A conformant **packer** MUST write only accepted files and MUST be
-deterministic. A **canonical** packer MUST write the section 9 layout, with
-INDEX by default and without it under `--no-index`. Canonical packers MUST
-agree byte for byte on every corpus file, for each setting.
+A conformant **packer** MUST write only well-formed files, MUST be
+deterministic, and MUST accept and refuse inputs as in section 9.2. A
+**canonical** packer MUST write the section 9 layout, with INDEX by default
+and without it under `--no-index`. Canonical packers MUST agree byte for
+byte on every corpus file, for each setting.
 
 ## 11. Test vectors and corpus
 
@@ -518,14 +643,18 @@ agree byte for byte on every corpus file, for each setting.
   duplicate; blocks not filling PROOFS; block-exprs 0 or > length/2; block
   with fewer/more records; frontier index listed after T; rule P with a
   constant declared after T and with T itself; duplicate declared name
-  (across records and inside one block); PAD with a non-zero byte.
+  (across records and inside one block); a declaration of the anonymous name;
+  `block-exprs` of 2^32; PAD with a non-zero byte. The rule P vectors are
+  declaration failures, not malformed files, but they sit with the reject
+  vectors because the outcome is rejected.
 - **Decline:** major 2; unknown must-understand section.
 - **Corpus.** Every canonical packer packs the test exports and Init, with
   and without `--no-index`. For each setting the files must be
   byte-identical. The two settings must give the same full-check outcome.
   The files must round-trip to the export's records, up to what section 9.1
-  drops. Large exports such as mathlib are tested locally; CI runs only the
-  vectors.
+  drops. CI runs the vectors and init-prelude, an export of Lean's
+  `Init.Prelude` kept in the repository. Init and larger exports such as
+  mathlib are only tested locally.
 - **INDEX vectors.** Accept: a file with INDEX, a file without INDEX, and a
   lookup of every declared name in the Init vector that gives the right
   record. Bad INDEX: offset not at a declaration record, kind mismatch,
@@ -535,9 +664,10 @@ agree byte for byte on every corpus file, for each setting.
   vectors. A full check MUST give the same outcome as for the same file with
   a correct INDEX, or with none. A subset check that relies on the bad entry
   MUST give "index invalid". Accept vectors exist with and without INDEX.
-- **Mutations.** The reference crate flips every single byte of the vectors
-  and checks that the reader never panics. Fuzzing with cargo-fuzz, and
-  comparing two independent readers on mutated files, are planned.
+- **Mutations.** The reference crate changes every single byte of the base
+  vector to a few values and checks that the reader never panics. That is a
+  smoke test, not fuzzing. Fuzzing with cargo-fuzz, and comparing two
+  independent readers on mutated files, are not done yet.
 
 ## Appendix A. Choices we made and why
 
@@ -579,7 +709,8 @@ to bignum limbs, decode in linear time, and take half the space of decimal
 for zero) is easier to read by eye. But a huge decimal literal takes
 quadratic time to decode.
 
-**R3. Limits.** Section 7 has one format limit, the u32 counts. Every limit
+**R3. Limits.** Section 7 has one format limit, the u32 counts, which also
+bounds `block-exprs`. Every limit
 that comes from an implementation or from buffering is a documented decline.
 
 **R4. Versioning.** The section directory has a must-understand bit. An

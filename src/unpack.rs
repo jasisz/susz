@@ -232,7 +232,7 @@ pub fn unpack<W: Write>(bytes: &[u8], w: &mut W) -> Result<(), UnpackError> {
                     all,
                 } => {
                     let mut local: Vec<u64> = Vec::with_capacity(block.exprs as usize);
-                    for r in Block::new(bytes, m.state(), *block) {
+                    for r in Block::new(bytes, m.state(), *block).without_rule_p() {
                         let (_, e) = r?;
                         let rf = |x: &Ref| match x {
                             Ref::Main(i) => ie[*i as usize],

@@ -11,8 +11,9 @@ const USAGE: &str = "usage:
 
 pack exits 0 when OUT is written, 1 when IN is not a valid export,
 2 when it cannot be packed (a limit, an unknown record or field, I/O,
-an internal error). verify exits 0 accepted, 1 rejected, 2 declined
-or unreadable. unpack exits 0 written, 1 rejected, 2 declined or I/O.";
+an internal error). verify exits 0 accepted, 1 rejected (the file is
+malformed, or a declaration fails a rule a reader checks without types,
+such as rule P), 2 declined or unreadable. unpack exits 0 written, 1 rejected, 2 declined or I/O.";
 
 extern "C" {
     fn _exit(code: i32) -> !;
@@ -138,8 +139,13 @@ fn cmd_verify(args: &[String]) {
                 }
             }
         }
+        Outcome::Rejected(e) if e.class.is_declaration_failure() => {
+            // the export's own failure: a packer writes such a file
+            println!("rejected: declaration failure: {e}");
+            exit(1);
+        }
         Outcome::Rejected(e) => {
-            println!("rejected: {e}");
+            println!("rejected: malformed: {e}");
             exit(1);
         }
         Outcome::Declined(e) => {

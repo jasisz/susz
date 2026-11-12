@@ -19,9 +19,9 @@ The file is input, not evidence. A checker that reads Susz trusts nothing in
 it and checks every count, offset and reference itself, so you don't have to
 trust the tool that wrote it either.
 
-The format is described in [docs/spec.md](docs/spec.md). Questions that came
-up while implementing it, and how we answered them, are in
-[docs/OPEN.md](docs/OPEN.md).
+The format is described in [docs/spec.md](docs/spec.md).
+[docs/OPEN.md](docs/OPEN.md) tells which questions came up while
+implementing it, and why the spec answers them the way it does.
 
 This repository is the reference implementation: a packer (ndjson to Susz), a
 reader that checks the structure, and a command-line tool.
@@ -50,6 +50,12 @@ problem is reported with where it is, for example
 `PROOFS @ 18,342,117: block of Foo.bar, record 12: ...`. With `--index` it
 also checks the index.
 
+There are two kinds of problems `verify` can find. A malformed file
+(`rejected: malformed: ...`) is one no packer should ever write. A
+declaration failure (`rejected: declaration failure: ...`) comes from the
+export itself: a theorem whose proof names a constant declared after it.
+`pack` writes such an export as it is, and `verify` reports that theorem.
+
 `unpack` turns a Susz file back into ndjson. Packing that again gives the same
 bytes. `mdata` and `letE`'s `nondep` flag are dropped on the way in, so they
 don't come back.
@@ -58,8 +64,8 @@ don't come back.
 
 | command | 0 | 1 | 2 |
 | --- | --- | --- | --- |
-| `pack` | written | the input is not a valid export (bad JSON, an id that is missing or used twice, a cut-off line, a name declared twice) | couldn't pack it (a limit, something this version doesn't know, I/O, a bug) |
-| `verify` | fine | broken | needs a newer reader, or unreadable |
+| `pack` | written | the input is not a valid export (bad JSON, an id that is missing or used twice, a cut-off line, a name declared twice, a declaration of the anonymous name) | couldn't pack it (a limit, something this version doesn't know, I/O, a bug) |
+| `verify` | fine | malformed, or a declaration fails | needs a newer reader, past a limit, or unreadable |
 | `unpack` | written | broken | needs a newer reader, or I/O |
 
 A panic counts as a bug: exit 2, and the partial output is removed.
@@ -76,8 +82,17 @@ match susz::verify(&bytes) {
 
 The main entry points: `susz::read::File::open` opens a file and checks its
 framing, `File::main()` walks the records, `susz::read::Block` reads one proof
-block, `susz::index::lookup` finds a declaration by name, and
-`susz::pack::pack_file` packs.
+block, and `susz::pack::pack_file` packs.
+
+`susz::index::Lookup` finds declarations by name. It decodes the index once
+and keeps its place in MAIN between lookups. The binary search is the cheap
+part. Each lookup also has to decode MAIN up to the declaration it finds,
+unless an earlier lookup already went that far. For a declaration near the
+end of mathlib that is nearly all of MAIN. `susz::index::lookup` does one
+lookup from scratch.
+
+The reader has one limit of its own: a string component of a name must be
+shorter than 2^32 − 2 bytes. A longer one makes it decline.
 
 ## Tests
 
@@ -87,14 +102,21 @@ cargo test --release -- --ignored    # Init, about 10 s
 cargo run --example gen-vectors      # regenerate tests/vectors/
 ```
 
+CI runs the unit tests, the vectors and init-prelude. It does not run Init
+or mathlib, and there is no fuzzing yet.
+
 `tests/vectors/` has small hand-made files: some that must be accepted, and
 for each rule a copy of one of them broken in exactly that way, with the error
 it should give. The declarations in them are real ones a kernel accepts
 (checked with [Pestka](https://github.com/jasisz/pestka)), so you can run a
 full checker on them, not just a reader.
 
-The corpus tests read exports from `SUSZ_CORPORA` (default
-`~/pestka-corpora`) and are skipped if they aren't there.
+`tests/corpus/init-prelude.ndjson.gz` is a lean4export export of Lean's
+`Init.Prelude` (see [tests/corpus/README.md](tests/corpus/README.md)). The
+corpus tests pack it, check the result, unpack it and pack it again. If the
+file is missing they skip it, unless `SUSZ_REQUIRE_CORPORA=1` is set, as in
+CI. Larger exports such as Init are read from `SUSZ_CORPORA` (default
+`~/pestka-corpora`) and skipped if they aren't there.
 
 ## License
 

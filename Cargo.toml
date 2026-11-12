@@ -20,3 +20,6 @@ debug = false
 [[example]]
 name = "gen-vectors"
 path = "examples/gen_vectors.rs"
+
+[dev-dependencies]
+flate2 = "1.1.11"

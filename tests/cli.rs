@@ -114,3 +114,46 @@ fn verify_exit_codes() {
         );
     }
 }
+
+// An export whose theorem names a constant declared after it: a declaration
+// failure, not a malformed file. The packer writes it, verify reports the
+// declaration failure, and unpack gives the export back.
+#[test]
+fn rule_p_is_a_declaration_failure() {
+    let input = "{\"meta\":{\"format\":{\"version\":\"3.1.0\"}}}\n\
+{\"in\":1,\"str\":{\"pre\":0,\"str\":\"A\"}}\n\
+{\"in\":2,\"str\":{\"pre\":0,\"str\":\"T\"}}\n\
+{\"ie\":0,\"sort\":0}\n\
+{\"const\":{\"name\":1,\"us\":[]},\"ie\":1}\n\
+{\"thm\":{\"all\":[2],\"levelParams\":[],\"name\":2,\"type\":0,\"value\":1}}\n\
+{\"axiom\":{\"isUnsafe\":false,\"levelParams\":[],\"name\":1,\"type\":0}}\n";
+    let (c, out) = pack("rule-p", input);
+    assert_eq!(c, 0);
+    let st = bin().arg("verify").arg(&out).output().unwrap();
+    let text = String::from_utf8_lossy(&st.stdout);
+    assert_eq!(st.status.code(), Some(1), "{text}");
+    assert!(
+        text.starts_with("rejected: declaration failure: ") && text.contains("(rule-p)"),
+        "{text}"
+    );
+    let nd = tmp("rule-p.unpacked.ndjson");
+    let st = bin().arg("unpack").arg(&out).arg(&nd).output().unwrap();
+    assert_eq!(
+        st.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    assert_eq!(
+        susz::digest::of_ndjson(nd.to_str().unwrap()).unwrap(),
+        susz::digest::of_ndjson(tmp("rule-p.ndjson").to_str().unwrap()).unwrap()
+    );
+}
+
+// A declaration of the anonymous name cannot be written: exit 1.
+#[test]
+fn anonymous_declaration_is_refused() {
+    let (c, out) = pack("anonymous", &GOOD.replace("\"name\":1,", "\"name\":0,"));
+    assert_eq!(c, 1);
+    no_leftovers(&out);
+}

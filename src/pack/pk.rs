@@ -464,6 +464,12 @@ impl Pk {
     }
     pub fn name_str(&mut self, i: u64, pre: u64, s: &[u8]) -> R<()> {
         let kp = self.nm(pre)?;
+        if s.len() as u64 >= crate::canon::MAX_COMPONENT {
+            return Err(cant!(
+                "a name component of {} bytes is too long for this packer",
+                s.len()
+            ));
+        }
         self.float_name(i)?;
         let id = self.names;
         self.nr.define(i, id, "name")?;

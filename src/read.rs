@@ -63,7 +63,10 @@ pub enum Class {
     FrontierIndex,
     /// A name declared twice.
     DuplicateName,
-    /// A block names a constant not declared before its theorem.
+    /// A declaration declares the anonymous name.
+    AnonymousName,
+    /// A block names a constant not declared before its theorem. This is a
+    /// declaration failure, not a structural error (spec section 2).
     RuleP,
     /// `block-exprs` of 0 or more than `block-length / 2`.
     BlockExprs,
@@ -73,6 +76,8 @@ pub enum Class {
     BlockCount,
     /// The trailer's counts differ from what MAIN defines.
     Counts,
+    /// The file goes past one of this reader's own limits (declined).
+    Limit,
 }
 
 impl Class {
@@ -106,16 +111,24 @@ impl Class {
             FrontierDuplicate => "frontier-duplicate",
             FrontierIndex => "frontier-index",
             DuplicateName => "duplicate-name",
+            AnonymousName => "anonymous-name",
             RuleP => "rule-p",
             BlockExprs => "block-exprs",
             ProofsFill => "proofs-fill",
             BlockCount => "block-count",
             Counts => "counts",
+            Limit => "limit",
         }
     }
     /// Classes that decline instead of rejecting.
     pub fn declines(self) -> bool {
-        matches!(self, Class::Major | Class::MustUnderstand)
+        matches!(self, Class::Major | Class::MustUnderstand | Class::Limit)
+    }
+    /// Classes that are declaration failures (spec section 2): the file is
+    /// well-formed up to the error, and the declaration fails. Every other
+    /// rejecting class is a structural error.
+    pub fn is_declaration_failure(self) -> bool {
+        matches!(self, Class::RuleP)
     }
 }
 
@@ -726,6 +739,10 @@ pub enum Event<'a> {
 
 const NONE: u32 = u32::MAX;
 
+/// The most expressions a proof block may hold (spec 7.1), so that a block
+/// index fits a u32.
+pub const MAX_BLOCK_EXPRS: u64 = u32::MAX as u64;
+
 /// What MAIN defined so far.
 pub struct State {
     pub names: u32,
@@ -944,7 +961,20 @@ impl<'a> Main<'a> {
         }
         let cp = self.st.name_canon[pre as usize];
         let c = match part {
-            Part::Str(s) => self.st.canon.str_id(self.bytes, cp, off, s.len() as u32),
+            Part::Str(s) => {
+                // the name table keeps a component's length in a u32
+                if s.len() as u64 >= crate::canon::MAX_COMPONENT {
+                    return Err((
+                        Class::Limit,
+                        format!(
+                            "a name component of {} bytes: this reader takes fewer than {}",
+                            s.len(),
+                            crate::canon::MAX_COMPONENT
+                        ),
+                    ));
+                }
+                self.st.canon.str_id(self.bytes, cp, off, s.len() as u32)
+            }
             Part::Num(k) => self.st.canon.num_id(cp, k),
         };
         if c as usize == self.st.canon_decl.len() {
@@ -959,6 +989,12 @@ impl<'a> Main<'a> {
     // A declared name: unique (spec 5.2).
     fn declare(&mut self, name: u32) -> Result<(), E> {
         let c = self.st.name_canon[name as usize] as usize;
+        if c == crate::canon::ANON as usize {
+            return Err((
+                Class::AnonymousName,
+                "a declaration declares the anonymous name".into(),
+            ));
+        }
         let d = self.st.canon_decl[c];
         if d != NONE {
             let s = self.st.canon.display(self.bytes, c as u32);
@@ -1274,6 +1310,14 @@ impl<'a> Main<'a> {
                         format!("block of {length} bytes cannot hold {exprs} expressions"),
                     ));
                 }
+                // block expressions are numbered by a u32 like every other
+                // kind (spec 7.1), decided here, before any block is read
+                if exprs > MAX_BLOCK_EXPRS {
+                    return Err((
+                        Class::BlockExprs,
+                        format!("block of {exprs} expressions: at most 2^32 - 1"),
+                    ));
+                }
                 let plen = self.proofs.map(|s| s.length).unwrap_or(0);
                 let used = self.st.proofs_used;
                 if length > plen - used {
@@ -1401,6 +1445,7 @@ pub struct Block<'a> {
     end: usize,
     k: u64,
     done: bool,
+    rule_p: bool,
 }
 
 impl<'a> Block<'a> {
@@ -1413,7 +1458,16 @@ impl<'a> Block<'a> {
             end: (b.offset + b.length) as usize,
             k: 0,
             done: false,
+            rule_p: true,
         }
+    }
+
+    /// The same reader without rule P, for tools that only convert the
+    /// representation (unpacking). Rule P is a declaration failure, not a
+    /// structural error, so such a block is still well-formed.
+    pub fn without_rule_p(mut self) -> Block<'a> {
+        self.rule_p = false;
+        self
     }
 
     fn fail(&self, class: Class, at: u64, rec: u64, msg: String) -> Failure {
@@ -1446,6 +1500,7 @@ impl<'a> Block<'a> {
             return Err((Class::BackDistance, "reference 0".into()));
         }
         if r <= self.k {
+            // k < block-exprs <= MAX_BLOCK_EXPRS, checked in the record
             return Ok(Ref::Block((self.k - r) as u32));
         }
         let f = r - self.k - 1;
@@ -1459,6 +1514,9 @@ impl<'a> Block<'a> {
     }
     // rule P (spec 6)
     fn placed(&self, name: u32) -> Result<(), E> {
+        if !self.rule_p {
+            return Ok(());
+        }
         let c = self.st.name_canon[name as usize] as usize;
         let d = self.st.canon_decl[c];
         if d == NONE || d >= self.b.decl {
@@ -1567,6 +1625,7 @@ impl<'a> Iterator for Block<'a> {
         match self.record(&mut c) {
             Ok(e) => {
                 self.p = c.p;
+                // k < block-exprs <= MAX_BLOCK_EXPRS, checked in the record
                 let k = self.k as u32;
                 self.k += 1;
                 Some(Ok((k, e)))
@@ -1613,4 +1672,39 @@ pub fn verify(bytes: &[u8]) -> Outcome {
         st.frontier[2].len() as u64,
     ];
     Outcome::Accepted(sum)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vectors::{build, Vector, Want, BASE};
+
+    fn outcome_with(exprs: u64, length: u64) -> Failure {
+        let src = BASE.replace(
+            "@d8 18 6 5 0 1 len:t cnt:t 1 5",
+            &format!("@d8 18 6 5 0 1 {length} {exprs} 1 5"),
+        );
+        let v = Vector {
+            name: "t".into(),
+            src,
+            want: Want::Accept,
+        };
+        match verify(&build(&v).bytes) {
+            Outcome::Rejected(f) => f,
+            o => panic!("{o:?}"),
+        }
+    }
+
+    // block-exprs is limited to 2^32 - 1 (spec 7.1), decided from the
+    // record before any block is read: 2^32 is a block-exprs error, 2^32 - 1
+    // passes that check and fails only because the block is not there.
+    #[test]
+    fn block_exprs_u32_range() {
+        let f = outcome_with(1 << 32, 1 << 33);
+        assert_eq!(f.class, Class::BlockExprs);
+        assert_eq!(f.place, Place::Section(format::SEC_MAIN));
+        let f = outcome_with(MAX_BLOCK_EXPRS, 2 * MAX_BLOCK_EXPRS);
+        assert_eq!(f.class, Class::ProofsFill);
+        assert_eq!(f.place, Place::Section(format::SEC_MAIN));
+    }
 }

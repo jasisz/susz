@@ -51,7 +51,7 @@ fn unique_names(pk: &Pk) -> R<()> {
         for &n in &pk.dmeta[q + 2..q + 2 + cnt] {
             let c = pk.canon[n as usize] as usize;
             if c == crate::canon::ANON as usize {
-                // its INDEX key would be empty (docs/OPEN.md)
+                // a structural error of MAIN (spec 5.2)
                 return Err(inv!("declaration {di} declares the anonymous name"));
             }
             if by[c] != u32::MAX {

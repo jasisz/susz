@@ -2,10 +2,8 @@
 //! they rely on, and the full check of an index (`verify_index`), whose
 //! result is apart from the file's verdict.
 
-use crate::canon::ANON;
 use crate::format;
 use crate::read::{Decl, Event, Failure, File, Main};
-use std::collections::HashMap;
 use std::fmt;
 
 /// Entry i of the index: declaration i.
@@ -18,13 +16,32 @@ pub struct Entry {
     pub block: Option<(u64, u64)>,
 }
 
-/// A decoded INDEX section.
+/// A decoded INDEX section. The name table stays front-coded: each entry
+/// points at its suffix in the section's bytes. Expanded keys are kept as
+/// well while their total size stays below a cap proportional to the
+/// section's length; past it, lookups scan the front-coded table instead.
+/// Either way the memory is linear in INDEX's length, and the answers are
+/// the same.
 #[derive(Debug, Clone)]
-pub struct Index {
+pub struct Index<'a> {
     pub entries: Vec<Entry>,
-    /// The name table: (key, declaration index), strictly increasing keys.
-    pub names: Vec<(Vec<u8>, u32)>,
+    body: &'a [u8],
+    names: Vec<NameRec>,
+    /// Every key expanded, end to end, and where each one ends.
+    flat: Option<(Vec<u8>, Vec<usize>)>,
 }
+
+#[derive(Debug, Clone, Copy)]
+struct NameRec {
+    shared: usize,
+    /// The suffix: its offset in the section and its length.
+    at: usize,
+    len: usize,
+    decl: u32,
+}
+
+/// The cap on expanded key bytes, per byte of INDEX. Mathlib needs about 2.6.
+pub const KEY_BYTES_PER_INDEX_BYTE: u64 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexError {
@@ -73,8 +90,17 @@ pub fn key_of_dotted(name: &str) -> Vec<u8> {
 }
 
 /// Decodes the INDEX section, checking its own rules (sizes, order, front
-/// coding); `Absent` when there is none.
-pub fn parse(file: &File) -> Result<Index, IndexError> {
+/// coding); `Absent` when there is none. Time and memory are linear in the
+/// section's length.
+pub fn parse<'a>(file: &File<'a>) -> Result<Index<'a>, IndexError> {
+    let len = file.section(format::SEC_INDEX).map_or(0, |s| s.length);
+    parse_capped(file, len.saturating_mul(KEY_BYTES_PER_INDEX_BYTE))
+}
+
+/// [`parse`] with a given cap on the expanded key bytes kept for binary
+/// search (for tests of the scan).
+#[doc(hidden)]
+pub fn parse_capped<'a>(file: &File<'a>, key_cap: u64) -> Result<Index<'a>, IndexError> {
     let Some(s) = file.section(format::SEC_INDEX) else {
         return Err(IndexError::Absent);
     };
@@ -123,21 +149,26 @@ pub fn parse(file: &File) -> Result<Index, IndexError> {
         });
     }
     let nn = v(&mut p)?;
-    if nn > (end - p) as u64 {
+    // every entry takes at least 3 bytes
+    if nn.saturating_mul(3) > (end - p) as u64 {
         return Err(bad("name-count runs past the section"));
     }
-    let mut names: Vec<(Vec<u8>, u32)> = Vec::with_capacity(nn as usize);
-    let mut prev: Vec<u8> = Vec::new();
+    let mut names: Vec<NameRec> = Vec::with_capacity(nn as usize);
+    let mut flat = Some((Vec::new(), Vec::with_capacity(nn as usize)));
+    let mut total = 0u64;
+    // the current key, kept in one buffer: O(suffix) work per entry
+    let mut cur: Vec<u8> = Vec::new();
     for i in 0..nn {
         let shared = v(&mut p)?;
         let sl = v(&mut p)?;
         if sl > (end - p) as u64 {
             return Err(bad(format!("name {i}: suffix runs past the section")));
         }
+        let at = p;
         let suffix = &b[p..p + sl as usize];
         p += sl as usize;
         let decl = v(&mut p)?;
-        if shared > prev.len() as u64 {
+        if shared > cur.len() as u64 {
             return Err(bad(format!(
                 "name {i}: shared {shared} is longer than the previous key"
             )));
@@ -146,44 +177,154 @@ pub fn parse(file: &File) -> Result<Index, IndexError> {
             return Err(bad(format!("name {i}: empty suffix")));
         }
         let shared = shared as usize;
-        if shared < prev.len() && prev[shared] == suffix[0] {
-            return Err(bad(format!(
-                "name {i}: shared {shared} is not the full common prefix"
-            )));
-        }
-        let mut key = prev[..shared].to_vec();
-        key.extend_from_slice(suffix);
-        if i > 0 && key <= prev {
-            return Err(bad(format!("name {i}: keys out of order or repeated")));
+        if shared < cur.len() {
+            // with `shared` the full common prefix, the key's order against
+            // the previous one is decided by this one byte
+            if cur[shared] == suffix[0] {
+                return Err(bad(format!(
+                    "name {i}: shared {shared} is not the full common prefix"
+                )));
+            }
+            if suffix[0] < cur[shared] {
+                return Err(bad(format!("name {i}: keys out of order")));
+            }
         }
         if decl >= nd {
             return Err(bad(format!("name {i}: declaration {decl} out of range")));
         }
-        prev = key.clone();
-        names.push((key, decl as u32));
+        cur.truncate(shared);
+        cur.extend_from_slice(suffix);
+        total = total.saturating_add(cur.len() as u64);
+        if total > key_cap {
+            flat = None;
+        }
+        if let Some((buf, ends)) = &mut flat {
+            buf.extend_from_slice(&cur);
+            ends.push(buf.len());
+        }
+        names.push(NameRec {
+            shared,
+            at,
+            len: suffix.len(),
+            decl: decl as u32,
+        });
     }
     if p != end {
         return Err(bad("bytes after the name table"));
     }
-    Ok(Index { entries, names })
+    Ok(Index {
+        entries,
+        body: b,
+        names,
+        flat,
+    })
 }
 
-/// Declared names of a declaration, in record order.
-fn declared(d: &Decl) -> Vec<u32> {
+impl<'a> Index<'a> {
+    /// The number of keys in the name table.
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+    /// Whether the expanded keys are kept (binary search), or lookups scan.
+    pub fn expanded(&self) -> bool {
+        self.flat.is_some()
+    }
+    /// The declaration named by key `j`.
+    pub fn decl(&self, j: usize) -> u32 {
+        self.names[j].decl
+    }
+    fn suffix(&self, j: usize) -> &'a [u8] {
+        let n = self.names[j];
+        &self.body[n.at..n.at + n.len]
+    }
+    /// Key `j`. Without the expanded keys this walks back through the
+    /// front coding.
+    pub fn key(&self, j: usize) -> Vec<u8> {
+        if let Some((buf, ends)) = &self.flat {
+            let a = if j == 0 { 0 } else { ends[j - 1] };
+            return buf[a..ends[j]].to_vec();
+        }
+        let mut parts: Vec<&[u8]> = vec![self.suffix(j)];
+        let mut need = self.names[j].shared;
+        let mut m = j;
+        while need > 0 {
+            m -= 1;
+            let s = self.names[m].shared;
+            if s < need {
+                parts.push(&self.suffix(m)[..need - s]);
+                need = s;
+            }
+        }
+        parts.iter().rev().flat_map(|x| x.iter().copied()).collect()
+    }
+    /// Calls `f` on every key in table order, with its declaration, in one
+    /// buffer (memory: the longest key).
+    pub fn try_for_each<E>(&self, mut f: impl FnMut(&[u8], u32) -> Result<(), E>) -> Result<(), E> {
+        let mut cur: Vec<u8> = Vec::new();
+        for (j, n) in self.names.iter().enumerate() {
+            cur.truncate(n.shared);
+            cur.extend_from_slice(self.suffix(j));
+            f(&cur, n.decl)?;
+        }
+        Ok(())
+    }
+    /// The declaration the table gives for `key`: a binary search over the
+    /// expanded keys, or one scan of the front-coded table.
+    pub fn find(&self, key: &[u8]) -> Option<u32> {
+        if let Some((buf, ends)) = &self.flat {
+            let at = |j: usize| -> &[u8] {
+                let a = if j == 0 { 0 } else { ends[j - 1] };
+                &buf[a..ends[j]]
+            };
+            let (mut lo, mut hi) = (0usize, ends.len());
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                match at(mid).cmp(key) {
+                    std::cmp::Ordering::Less => lo = mid + 1,
+                    std::cmp::Ordering::Greater => hi = mid,
+                    std::cmp::Ordering::Equal => return Some(self.names[mid].decl),
+                }
+            }
+            return None;
+        }
+        // `l`: the common prefix of the previous key and `key`; the previous
+        // key is below `key`. Parsing checked the order and the front coding.
+        let mut l = 0usize;
+        for (j, n) in self.names.iter().enumerate() {
+            if n.shared > l {
+                // agrees with the previous key past `l`: still below
+                continue;
+            }
+            if n.shared < l {
+                // above the previous key where that one equals `key`
+                return None;
+            }
+            let s = self.suffix(j);
+            let q = &key[l..];
+            let m = s.iter().zip(q).take_while(|(a, b)| a == b).count();
+            if m == s.len() {
+                if m == q.len() {
+                    return Some(n.decl);
+                }
+                l += m;
+            } else if m == q.len() || s[m] > q[m] {
+                return None;
+            } else {
+                l += m;
+            }
+        }
+        None
+    }
+}
+
+/// The number of names a declaration declares.
+fn declared_count(d: &Decl) -> u64 {
     match d {
-        Decl::Axiom { head, .. }
-        | Decl::Defn { head, .. }
-        | Decl::Thm { head, .. }
-        | Decl::Opaque { head, .. }
-        | Decl::Quot { head, .. }
-        | Decl::ThmBlock { head, .. } => vec![head.name],
-        Decl::Inductive(i) => i
-            .types
-            .iter()
-            .map(|t| t.head.name)
-            .chain(i.ctors.iter().map(|c| c.head.name))
-            .chain(i.recs.iter().map(|r| r.head.name))
-            .collect(),
+        Decl::Inductive(i) => (i.types.len() + i.ctors.len() + i.recs.len()) as u64,
+        _ => 1,
     }
 }
 
@@ -224,60 +365,130 @@ pub struct Found {
     pub block: Option<(u64, u64)>,
 }
 
-/// Finds a declared name by its key, reading INDEX and the MAIN prefix up
-/// to the declaration (never PROOFS), and verifying every entry it relies on.
-pub fn lookup(file: &File, key: &[u8]) -> Result<Found, IndexError> {
-    let ix = parse(file)?;
-    let i = match ix.names.binary_search_by(|(k, _)| k.as_slice().cmp(key)) {
-        Ok(j) => ix.names[j].1,
-        Err(_) => return Err(IndexError::NotFound),
-    };
-    let proofs = file
-        .section(format::SEC_PROOFS)
-        .map(|s| s.offset)
-        .unwrap_or(0);
-    let mut m: Main = file.main();
-    let start = m.start();
-    while let Some(ev) = m.next() {
-        let ev = ev.map_err(IndexError::File)?;
-        if let Event::Decl {
+#[derive(Debug, Clone, Copy)]
+struct Seen {
+    kind: u8,
+    offset: u64,
+    block: Option<(u64, u64)>,
+}
+
+/// Many lookups in one file. INDEX is decoded once, in [`Lookup::new`].
+/// MAIN is read once as well: the reader keeps its state, and goes on from
+/// where the furthest lookup so far stopped.
+///
+/// The cost of a lookup of declaration i is the binary search (or one scan
+/// of the name table, past the key cap), plus decoding MAIN up to the end
+/// of declaration i's record, if no earlier lookup went that far. That MAIN
+/// prefix is the main cost: for a declaration late in the file it is almost
+/// all of MAIN. Lookups never read PROOFS. Every entry a lookup relies on is
+/// verified: the entries of declarations 0 to i, and the key against the
+/// names declaration i declares.
+pub struct Lookup<'a> {
+    bytes: &'a [u8],
+    index: Index<'a>,
+    main: Main<'a>,
+    start: u64,
+    proofs: u64,
+    seen: Vec<Seen>,
+    /// An entry or MAIN record that failed: lookups past it fail the same way.
+    stop: Option<IndexError>,
+}
+
+impl<'a> Lookup<'a> {
+    /// Decodes INDEX. MAIN is read later, as far as lookups need.
+    pub fn new(file: &File<'a>) -> Result<Lookup<'a>, IndexError> {
+        let index = parse(file)?;
+        let main = file.main();
+        Ok(Lookup {
+            bytes: file.bytes,
             index,
-            offset,
-            decl,
-        } = ev
-        {
-            let e = &ix.entries[index as usize];
-            check_entry(e, index, offset - start, &decl, proofs)?;
-            if index == i {
-                let st = m.state();
-                let ok = declared(&decl).into_iter().any(|n| {
-                    let mut k = Vec::new();
-                    st.canon.key(file.bytes, st.name_canon[n as usize], &mut k);
-                    k == key
-                });
-                if !ok {
-                    return Err(bad(format!(
-                        "the key does not name a name declaration {i} declares"
-                    )));
+            start: main.start(),
+            main,
+            proofs: file
+                .section(format::SEC_PROOFS)
+                .map(|s| s.offset)
+                .unwrap_or(0),
+            seen: Vec::new(),
+            stop: None,
+        })
+    }
+
+    /// The decoded INDEX.
+    pub fn index(&self) -> &Index<'a> {
+        &self.index
+    }
+
+    /// Finds a declared name by its key.
+    pub fn find(&mut self, key: &[u8]) -> Result<Found, IndexError> {
+        let i = self.index.find(key).ok_or(IndexError::NotFound)?;
+        while self.seen.len() <= i as usize {
+            if let Some(e) = &self.stop {
+                return Err(e.clone());
+            }
+            match self.main.next() {
+                None => return Err(bad(format!("declaration {i} is not in MAIN"))),
+                Some(Err(e)) => {
+                    let e = IndexError::File(e);
+                    self.stop = Some(e.clone());
+                    return Err(e);
                 }
-                let block = match decl {
-                    Decl::ThmBlock { block, .. } => Some((block.offset, block.length)),
-                    _ => None,
-                };
-                return Ok(Found {
-                    decl: i,
-                    kind: e.kind,
+                Some(Ok(Event::Decl {
+                    index,
                     offset,
-                    block,
-                });
+                    decl,
+                })) => {
+                    let checked = match self.index.entries.get(index as usize) {
+                        None => Err(bad("more declarations than entries")),
+                        Some(e) => check_entry(e, index, offset - self.start, &decl, self.proofs),
+                    };
+                    if let Err(e) = checked {
+                        self.stop = Some(e.clone());
+                        return Err(e);
+                    }
+                    let block = match decl {
+                        Decl::ThmBlock { block, .. } => Some((block.offset, block.length)),
+                        _ => None,
+                    };
+                    self.seen.push(Seen {
+                        kind: decl.kind(),
+                        offset,
+                        block,
+                    });
+                }
+                Some(Ok(_)) => {}
             }
         }
+        // the key names a name declaration i declares, compared by value
+        let st = self.main.state();
+        match st.canon.find_key(self.bytes, key) {
+            Some(c) if st.canon_decl[c as usize] == i => {}
+            _ => {
+                return Err(bad(format!(
+                    "the key does not name a name declaration {i} declares"
+                )))
+            }
+        }
+        let s = self.seen[i as usize];
+        Ok(Found {
+            decl: i,
+            kind: s.kind,
+            offset: s.offset,
+            block: s.block,
+        })
     }
-    Err(bad(format!("declaration {i} is not in MAIN")))
+}
+
+/// One lookup: [`Lookup::new`] then [`Lookup::find`]. For many lookups in
+/// the same file, keep a [`Lookup`]: this decodes INDEX on every call and
+/// reads MAIN again from the start.
+pub fn lookup(file: &File, key: &[u8]) -> Result<Found, IndexError> {
+    Lookup::new(file)?.find(key)
 }
 
 /// Checks every entry and the whole name table against the records
 /// (spec 6a.3). The file's verdict is apart: a malformed MAIN gives `File`.
+/// Memory stays linear in the bytes read: keys are compared one at a time
+/// against the names MAIN built.
 pub fn verify_index(file: &File) -> Result<(), IndexError> {
     let ix = parse(file)?;
     let proofs = file
@@ -286,7 +497,7 @@ pub fn verify_index(file: &File) -> Result<(), IndexError> {
         .unwrap_or(0);
     let mut m = file.main();
     let start = m.start();
-    let mut decl_names: Vec<(u32, u32)> = Vec::new();
+    let mut declared = 0u64;
     for ev in m.by_ref() {
         let ev = ev.map_err(IndexError::File)?;
         if let Event::Decl {
@@ -300,38 +511,25 @@ pub fn verify_index(file: &File) -> Result<(), IndexError> {
                 .get(index as usize)
                 .ok_or_else(|| bad("more declarations than entries"))?;
             check_entry(e, index, offset - start, &decl, proofs)?;
-            for n in declared(&decl) {
-                decl_names.push((n, index));
-            }
+            declared += declared_count(&decl);
         }
     }
     let st = m.state();
-    let mut want: HashMap<Vec<u8>, u32> = HashMap::with_capacity(decl_names.len());
-    for (n, d) in decl_names {
-        let c = st.name_canon[n as usize];
-        let mut k = Vec::new();
-        if c != ANON {
-            st.canon.key(file.bytes, c, &mut k);
-        }
-        want.insert(k, d);
-    }
-    if want.len() != ix.names.len() {
+    if declared != ix.len() as u64 {
         return Err(bad(format!(
-            "{} declared names, the name table holds {}",
-            want.len(),
-            ix.names.len()
+            "{declared} declared names, the name table holds {}",
+            ix.len()
         )));
     }
-    for (k, d) in &ix.names {
-        match want.get(k) {
-            Some(x) if x == d => {}
-            Some(x) => {
-                return Err(bad(format!(
-                    "a key names declaration {d}, it is declared by {x}"
-                )))
-            }
-            None => return Err(bad("a key names no declared name")),
-        }
-    }
-    Ok(())
+    // Keys are distinct (strictly increasing) and each names a distinct
+    // declared name of its declaration; with the counts equal, every
+    // declared name is in the table once.
+    ix.try_for_each(|k, d| match st.canon.find_key(file.bytes, k) {
+        Some(c) if st.canon_decl[c as usize] == d => Ok(()),
+        Some(c) if st.canon_decl[c as usize] != u32::MAX => Err(bad(format!(
+            "a key names declaration {d}, it is declared by {}",
+            st.canon_decl[c as usize]
+        ))),
+        _ => Err(bad("a key names no declared name")),
+    })
 }

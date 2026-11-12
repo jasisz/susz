@@ -11,4 +11,7 @@ jobs:
         with:
           components: clippy
       - run: cargo test --release --locked
+        env:
+          # init-prelude is in the repository: fail if it is missing
+          SUSZ_REQUIRE_CORPORA: "1"
       - run: cargo clippy --release --locked --all-targets

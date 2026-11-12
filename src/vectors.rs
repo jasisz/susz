@@ -530,6 +530,8 @@ pub fn all() -> Vec<Vector> {
         r("frontier-duplicate", "a level listed twice in the frontier.", "19 1 1                  # frontier level 1", "! 19 1 2                # frontier level 1", FrontierDuplicate),
         r("block-exprs-0", "block-exprs 0.", "@d8 18 6 5 0 1 len:t cnt:t 1 5", "! @d8 18 6 5 0 1 len:t 0 1 5", BlockExprs),
         r("block-exprs-over-half", "block-exprs above block-length / 2.", "@d8 18 6 5 0 1 len:t cnt:t 1 5", "! @d8 18 6 5 0 1 len:t 999 1 5", BlockExprs),
+        r("block-exprs-u32", "block-exprs of 2^32, above the u32 limit.", "@d8 18 6 5 0 1 len:t cnt:t 1 5", "! @d8 18 6 5 0 1 8589934592 4294967296 1 5", BlockExprs),
+        r("anonymous-name", "a declaration of the anonymous name.", "@d5 18 0 13 0 35 0", "! @d5 18 0 0 0 35 0", AnonymousName),
         r("block-past-proofs", "a block longer than PROOFS.", "@d8 18 6 5 0 1 len:t cnt:t 1 5", "! @d8 18 6 5 0 1 99 cnt:t 1 5", ProofsFill),
         r("frontier-index-expr", "a frontier expression not listed before the theorem.", "11 2 7 14 1             # t12", "! 11 2 7 15 1           # t12", FrontierIndex),
         r("frontier-index-name", "a frontier name not listed before the theorem.", "11 2 7 14 1             # t12", "! 11 2 8 14 1           # t12", FrontierIndex),
@@ -750,9 +752,10 @@ fn accepted_text(bytes: &[u8], index: bool) -> String {
             Err(crate::index::IndexError::Absent) => s.push_str("index absent\n"),
             Ok(ix) => {
                 s.push_str("index ok\n");
-                for (k, d) in &ix.names {
+                let _ = ix.try_for_each(|k, d| -> Result<(), ()> {
                     s.push_str(&format!("lookup {} found {d}\n", dotted(k)));
-                }
+                    Ok(())
+                });
             }
             Err(e) => s.push_str(&format!("index error {e}\n")),
         }
@@ -781,6 +784,7 @@ pub fn dotted(k: &[u8]) -> String {
 /// The expectation text the reader gives for a vector's bytes (what the
 /// tests compare with the `.expect` file).
 pub fn observed_text(v: &Vector, bytes: &[u8]) -> String {
+    // one lookup per name, each from scratch
     let lookups = |looks: &[(&str, Look)], f: &read::File| -> String {
         let mut s = String::new();
         for (n, _) in looks {
@@ -814,12 +818,23 @@ pub fn observed_text(v: &Vector, bytes: &[u8]) -> String {
                         if let Err(e) = crate::index::verify_index(&f) {
                             s.push_str(&format!("verify-index failed: {e}\n"));
                         }
-                        // every listed name looks up to its declaration
+                        // every listed name looks up to its declaration: one
+                        // lookup each, then all of them in one Lookup, from the
+                        // last key to the first, then with the keys expanded
+                        // and scanned (a cap of 0)
                         let ix = crate::index::parse(&f).unwrap();
-                        for (k, d) in &ix.names {
-                            match crate::index::lookup(&f, k) {
-                                Ok(x) if x.decl == *d => {}
-                                r => s.push_str(&format!("lookup {} gave {r:?}\n", dotted(k))),
+                        let scan = crate::index::parse_capped(&f, 0).unwrap();
+                        let mut many = crate::index::Lookup::new(&f).unwrap();
+                        for j in (0..ix.len()).rev() {
+                            let (k, d) = (ix.key(j), ix.decl(j));
+                            if scan.key(j) != k || scan.find(&k) != Some(d) {
+                                s.push_str(&format!("scan of {} differs\n", dotted(&k)));
+                            }
+                            for r in [crate::index::lookup(&f, &k), many.find(&k)] {
+                                match r {
+                                    Ok(x) if x.decl == d => {}
+                                    r => s.push_str(&format!("lookup {} gave {r:?}\n", dotted(&k))),
+                                }
                             }
                         }
                     }
