@@ -1,14 +1,17 @@
 outcome accepted
-counts 13 5 14 8
-digest 054f2a4b75f9b546
+counts 17 6 52 10
+digest 1a1dfaf4b3699ab5
 index ok
-lookup L found 4
-lookup Q found 3
-lookup S found 5
-lookup T found 6
-lookup Z found 7
+lookup L found 6
+lookup S found 7
+lookup T found 8
+lookup Z found 9
+lookup Eq found 3
+lookup Eq.refl found 3
 lookup Ind found 2
 lookup Ind.mk found 2
 lookup Ind.rec found 2
 lookup Nat found 0
 lookup Nat.zero found 1
+lookup Quot found 4
+lookup String found 5

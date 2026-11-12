@@ -78,6 +78,8 @@ cargo run --example gen-vectors      # regenerate tests/vectors/
 The vectors in `tests/vectors/` are written in a small assembler
 (`src/asm.rs`); every reject vector is one mutation of an accept vector,
 named after the rule it breaks, with the expected class and location. The
+declarations of the accept vectors type-check in a Lean kernel, so a full
+checker can run on every vector. The
 corpus tests read exports from `SUSZ_CORPORA` (default `~/pestka-corpora`).
 
 ## License

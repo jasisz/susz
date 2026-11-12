@@ -394,10 +394,11 @@ canonical packers produce identical bytes:
 - Each frontier entry right after the record of the item it lists; the
   anonymous name's and level zero's entries first, before any record, when
   they are listed.
-- Sections in id order MAIN, PROOFS, INDEX, SOURCE; INDEX written by
+- Sections in this order, in the body and in the directory alike: MAIN
+  (id 1), PROOFS (id 2, only when some kind-6 declaration exists), INDEX
+  (id 5), SOURCE (id 3). This is not id order. INDEX is written by
   default and omitted with `--no-index` (every canonical packer takes the
-  option); no
-  PAD, no private sections.
+  option); SOURCE is always written; no PAD, no private sections.
 - Canonical bytes are defined per (export, INDEX on/off): for each setting
   both canonical packers MUST write identical bytes. The two files differ
   only by the INDEX section and its directory entry.
@@ -454,6 +455,9 @@ agree byte for byte on every corpus file, for each setting.
   with blocks; a block naming frontier items of each kind; varint edge
   values (0, 127, 128, 2^63, 2^64−1); `nat` 0, 255, 256, 2^64, 2^200;
   strings with NUL and 4-byte UTF-8; unknown informational section; PAD.
+  The declarations of every accept vector type-check in a Lean kernel, so
+  a full checker accepts them and reaches the one fault of every reject
+  vector made from them.
 - **Reject (one or more each):** magic; reserved bytes; trailer length;
   end magic; directory overlap / gap / out of file / duplicate id / bad
   flags on a known id; counts mismatch; non-minimal varint; 11-byte varint;
