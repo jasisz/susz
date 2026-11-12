@@ -370,7 +370,7 @@ impl Pk {
         if nn >= 1 << 28 {
             return Err(cant!("too many names for this packer"));
         }
-        self.new_expr(ie, (nn << 4) | (if lam { 2 } else { 6 }) + bi, kt, kb)
+        self.new_expr(ie, (nn << 4) | ((if lam { 2 } else { 6 }) + bi), kt, kb)
     }
     pub fn bvar(&mut self, ie: u64, k: u64) -> R<()> {
         let off = self.xstart(ie)?;
@@ -631,6 +631,7 @@ impl Pk {
         Ok(())
     }
     // hints: 0 opaque, 1 abbrev, 2 regular(h); safety 0 safe 1 unsafe 2 partial
+    #[allow(clippy::too_many_arguments)]
     pub fn defn(
         &mut self,
         name: u64,

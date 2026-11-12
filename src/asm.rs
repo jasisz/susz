@@ -299,8 +299,8 @@ pub fn assemble(src: &str) -> Result<Assembled, String> {
                 }
             }
             "counts" => {
-                for k in 0..4 {
-                    counts[k] = num(ws
+                for (k, c) in counts.iter_mut().enumerate() {
+                    *c = num(ws
                         .get(k + 1)
                         .ok_or_else(|| e("counts takes 4 numbers".into()))?)
                     .map_err(e)? as u32;

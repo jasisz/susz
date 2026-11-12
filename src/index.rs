@@ -287,7 +287,7 @@ pub fn verify_index(file: &File) -> Result<(), IndexError> {
     let mut m = file.main();
     let start = m.start();
     let mut decl_names: Vec<(u32, u32)> = Vec::new();
-    while let Some(ev) = m.next() {
+    for ev in m.by_ref() {
         let ev = ev.map_err(IndexError::File)?;
         if let Event::Decl {
             index,

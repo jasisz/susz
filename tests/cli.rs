@@ -1,6 +1,6 @@
 // The command's exit codes, and that it never leaves a partial output.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn bin() -> Command {
@@ -11,7 +11,7 @@ fn tmp(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("cli-{name}"))
 }
 
-fn no_leftovers(out: &PathBuf) {
+fn no_leftovers(out: &Path) {
     assert!(!out.exists(), "{} was written", out.display());
     let dir = out.parent().unwrap();
     let stem = out.file_name().unwrap().to_string_lossy().to_string();
