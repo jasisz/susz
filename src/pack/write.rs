@@ -50,6 +50,10 @@ fn unique_names(pk: &Pk) -> R<()> {
         let cnt = pk.dmeta[q + 1] as usize;
         for &n in &pk.dmeta[q + 2..q + 2 + cnt] {
             let c = pk.canon[n as usize] as usize;
+            if c == crate::canon::ANON as usize {
+                // its INDEX key would be empty (docs/OPEN.md)
+                return Err(inv!("declaration {di} declares the anonymous name"));
+            }
             if by[c] != u32::MAX {
                 let name = pk.cn.display(&pk.stream, c as u32);
                 return Err(if by[c] == di {

@@ -38,6 +38,12 @@ fn main() {
             susz::format::MAJOR
         ),
         "--help" | "-h" | "help" => println!("{USAGE}"),
+        // for the tests of the panic path: a temporary output, then a panic
+        "__panic-test" if args.len() == 2 => {
+            std::fs::write(&args[1], b"partial").unwrap();
+            susz::cleanup::register(&args[1]);
+            panic!("panic test");
+        }
         _ => usage(),
     }
 }

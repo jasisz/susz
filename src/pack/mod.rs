@@ -102,6 +102,7 @@ impl Default for Options {
 /// What a packing run wrote.
 #[derive(Debug, Clone, Default)]
 pub struct Stats {
+    /// Names and levels with their implicit id 0, as the trailer counts them.
     pub names: u64,
     pub levels: u64,
     pub exprs: u64,
@@ -121,8 +122,8 @@ impl fmt::Display for Stats {
         write!(
             f,
             "names {}, levels {}, expressions {} (MAIN {}, in blocks {}), declarations {} (blocks {}); MAIN {} bytes, PROOFS {}, INDEX {}, SOURCE {}; file {} bytes{}",
-            self.names,
-            self.levels,
+            self.names - 1,
+            self.levels - 1,
             self.exprs,
             self.main_exprs,
             self.exprs - self.main_exprs,
@@ -160,10 +161,11 @@ pub fn pack_file(input: &str, output: &str, opts: &Options) -> R<Stats> {
         let mut st = write::write(pk, &mut w, opts.index)?;
         use std::io::Write;
         w.flush().map_err(|e| cant!("cannot write {tmp}: {e}"))?;
+        // complete for every other process once renamed; no fsync (on macOS a
+        // full flush to the device costs seconds on mathlib)
         let f = w
             .into_inner()
             .map_err(|e| cant!("cannot write {tmp}: {e}"))?;
-        f.sync_all().map_err(|e| cant!("cannot write {tmp}: {e}"))?;
         drop(f);
         std::fs::rename(&tmp, output).map_err(|e| cant!("cannot rename {tmp} to {output}: {e}"))?;
         st.parallel = parallel;
