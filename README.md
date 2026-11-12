@@ -79,3 +79,8 @@ The vectors in `tests/vectors/` are written in a small assembler
 (`src/asm.rs`); every reject vector is one mutation of an accept vector,
 named after the rule it breaks, with the expected class and location. The
 corpus tests read exports from `SUSZ_CORPORA` (default `~/pestka-corpora`).
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
