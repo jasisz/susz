@@ -5,6 +5,8 @@
 //!   full structural verification with located errors.
 //! - [`index`]: the INDEX section: lookups and their verification.
 //! - [`unpack`]: Susz 1 back to ndjson.
+//! - `mmap` (cargo feature `mmap`): `open_mmap`, a file's bytes through a
+//!   memory map.
 //!
 //! The format is specified in `docs/spec.md`.
 
@@ -13,12 +15,16 @@ pub mod canon;
 pub mod digest;
 pub mod format;
 pub mod index;
+#[cfg(feature = "mmap")]
+pub mod mmap;
 pub mod pack;
 pub mod read;
 pub mod unpack;
 #[doc(hidden)]
 pub mod vectors;
 
+#[cfg(feature = "mmap")]
+pub use mmap::{open_mmap, Mapped};
 pub use read::{verify, Failure, Outcome};
 
 /// A path removed if the process panics (the packer's temporary output).

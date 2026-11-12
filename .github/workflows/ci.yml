@@ -14,4 +14,8 @@ jobs:
         env:
           # init-prelude is in the repository: fail if it is missing
           SUSZ_REQUIRE_CORPORA: "1"
+      - run: cargo test --release --locked --features mmap
+        env:
+          SUSZ_REQUIRE_CORPORA: "1"
       - run: cargo clippy --release --locked --all-targets
+      - run: cargo clippy --release --locked --all-targets --features mmap

@@ -8,6 +8,14 @@ publish = false
 rust-version = "1.80"
 
 [dependencies]
+# Only with the `mmap` feature (off by default): the library itself has no
+# dependencies.
+memmap2 = { version = "=0.9.10", optional = true }
+
+[features]
+# susz::open_mmap, and the `susz` binary maps the files it verifies or
+# unpacks instead of reading them: `cargo install --path . --features mmap`.
+mmap = ["dep:memmap2"]
 
 [profile.release]
 lto = true

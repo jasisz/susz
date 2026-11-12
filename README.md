@@ -30,6 +30,7 @@ reader that checks the structure, and a command-line tool.
 
 ```sh
 cargo install --path .
+cargo install --path . --features mmap   # verify and unpack map the file
 ```
 
 ## Usage
@@ -91,6 +92,51 @@ unless an earlier lookup already went that far. For a declaration near the
 end of mathlib that is nearly all of MAIN. `susz::index::lookup` does one
 lookup from scratch.
 
+### Memory-mapped files
+
+The reader only wants a `&[u8]`, so a memory-mapped file works as well as one
+read into memory. With the cargo feature `mmap`, `susz::open_mmap(path)` maps
+a file read-only and gives back something that derefs to `[u8]`. If the file
+can't be mapped (a pipe, say), it reads it into memory instead.
+
+The feature is off by default and is the only thing that pulls in a
+dependency (`memmap2`). Cargo has no dependencies just for a binary, so
+turning it on by default would give every library user `memmap2` too. That's
+why the `susz` command uses mmap only when built with `--features mmap`, and
+reads the file otherwise.
+
+`open_mmap` is `unsafe`, for a plain reason: nothing may truncate or change
+the file while it is mapped. A change shows up in bytes the reader already
+checked, and a truncation makes the next read of a lost page raise `SIGBUS`.
+The `susz` command treats its input as a file it doesn't own. It maps it
+read-only and never writes to it, and on Linux and macOS it catches `SIGBUS`:
+it says the file was truncated or couldn't be read, removes any partial
+output, and exits 2.
+
+What it buys, measured on mathlib (Susz 623 MB with INDEX, 608 MB without) on
+an M2 Pro, median of three warm runs:
+
+| | wall | instructions | peak footprint | max RSS |
+| --- | --- | --- | --- | --- |
+| `verify`, read | 2.9 s | 31.3 G | 817 MB | 818 MB |
+| `verify`, mmap | 3.0 s | 31.2 G | 210 MB | 818 MB |
+| `verify --index`, read | 4.9 s | 48.5 G | 994 MB | 994 MB |
+| `verify --index`, mmap | 4.9 s | 48.2 G | 373 MB | 995 MB |
+| one late `Lookup`, read | 1.6 s | 16.2 G | 895 MB | 895 MB |
+| one late `Lookup`, mmap | 1.6 s | 15.9 G | 273 MB | 594 MB |
+
+(MB here are MiB.) The peak footprint is the memory that belongs to the
+process alone. Mapped pages are part of the system's file cache: they count
+in the resident size, but the system can drop them and read them again. So
+mmap gives the file's size back as private memory, and saving the copy
+saves 0.3 to 1.7% of the instructions. The wall time stays the same. A lookup never touches
+PROOFS, so those pages are never even read in.
+
+Cold is less rosy. On a fresh copy of the file, written with the cache turned
+off for it, mmap was slower: 3.7 s against 2.9 s for `verify`, 1.9 s against
+1.6 s for the lookup, in two runs each on a busy machine. Telling the system
+the reads would be sequential didn't help.
+
 The reader has one limit of its own: a string component of a name must be
 shorter than 2^32 − 2 bytes. A longer one makes it decline.
 
@@ -102,8 +148,9 @@ cargo test --release -- --ignored    # Init, about 10 s
 cargo run --example gen-vectors      # regenerate tests/vectors/
 ```
 
-CI runs the unit tests, the vectors and init-prelude. It does not run Init
-or mathlib, and there is no fuzzing yet.
+CI runs the unit tests, the vectors and init-prelude, with and without the
+`mmap` feature. It does not run Init or mathlib, and there is no fuzzing
+yet.
 
 `tests/vectors/` has small hand-made files: some that must be accepted, and
 for each rule a copy of one of them broken in exactly that way, with the error

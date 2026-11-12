@@ -45,6 +45,22 @@ fn main() {
             susz::cleanup::register(&args[1]);
             panic!("panic test");
         }
+        // for the tests of the SIGBUS path: map a file, truncate it, touch
+        // a lost page
+        #[cfg(feature = "mmap")]
+        "__sigbus-test" if args.len() == 3 => {
+            std::fs::write(&args[2], b"partial").unwrap();
+            sigbus::output(Some(&args[2]));
+            let bytes = read_file(&args[1]);
+            std::fs::File::options()
+                .write(true)
+                .open(&args[1])
+                .unwrap()
+                .set_len(0)
+                .unwrap();
+            let last = unsafe { std::ptr::read_volatile(&bytes[bytes.len() - 1]) };
+            println!("still here: {last} (mapped: {})", bytes.is_mapped());
+        }
         _ => usage(),
     }
 }
@@ -96,11 +112,99 @@ fn cmd_pack(args: &[String]) {
     }
 }
 
+// The input file's bytes. With the `mmap` feature the file is mapped
+// read-only. It is input the command does not own: if something truncates it
+// while it is mapped, the next access to a lost page raises SIGBUS, and
+// `sigbus` turns that into exit 2 with any partial output removed.
+#[cfg(feature = "mmap")]
+fn read_file(path: &str) -> susz::Mapped {
+    sigbus::install(path);
+    // SAFETY: a change to the file while it is mapped either shows up as
+    // bytes the reader checks like any others, or raises SIGBUS (above).
+    unsafe { susz::open_mmap(path) }.unwrap_or_else(|e| {
+        eprintln!("susz: cannot read {path}: {e}");
+        exit(2)
+    })
+}
+
+#[cfg(not(feature = "mmap"))]
 fn read_file(path: &str) -> Vec<u8> {
     std::fs::read(path).unwrap_or_else(|e| {
         eprintln!("susz: cannot read {path}: {e}");
         exit(2)
     })
+}
+
+// SIGBUS while a file is mapped: the file was truncated under us, or a page
+// could not be read in. Report it, remove the partial output, exit 2. Only
+// async-signal-safe calls in the handler: write, unlink, _exit.
+#[cfg(all(feature = "mmap", any(target_os = "linux", target_os = "macos")))]
+mod sigbus {
+    use std::ffi::{c_char, c_void, CString};
+    use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+
+    #[cfg(target_os = "linux")]
+    const SIGBUS: i32 = 7;
+    #[cfg(target_os = "macos")]
+    const SIGBUS: i32 = 10;
+
+    extern "C" {
+        fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
+        fn write(fd: i32, buf: *const c_void, n: usize) -> isize;
+        fn unlink(path: *const c_char) -> i32;
+        fn _exit(code: i32) -> !;
+    }
+
+    static MSG: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
+    static MSG_LEN: AtomicUsize = AtomicUsize::new(0);
+    static TMP: AtomicPtr<c_char> = AtomicPtr::new(std::ptr::null_mut());
+
+    extern "C" fn on_sigbus(_: i32) {
+        unsafe {
+            let m = MSG.load(Ordering::SeqCst);
+            if !m.is_null() {
+                write(2, m as *const c_void, MSG_LEN.load(Ordering::SeqCst));
+            }
+            let t = TMP.load(Ordering::SeqCst);
+            if !t.is_null() {
+                unlink(t);
+            }
+            _exit(2)
+        }
+    }
+
+    pub fn install(path: &str) {
+        let msg: &'static [u8] = Box::leak(
+            format!("susz: {path} was truncated or could not be read while mapped\n")
+                .into_bytes()
+                .into_boxed_slice(),
+        );
+        MSG_LEN.store(msg.len(), Ordering::SeqCst);
+        MSG.store(msg.as_ptr() as *mut u8, Ordering::SeqCst);
+        unsafe {
+            signal(SIGBUS, on_sigbus);
+        }
+    }
+
+    /// The partial output to remove on SIGBUS (`None`: nothing to remove).
+    pub fn output(path: Option<&str>) {
+        let p = path
+            .and_then(|p| CString::new(p).ok())
+            .map_or(std::ptr::null_mut(), CString::into_raw);
+        // the previous path is leaked: the handler may be reading it
+        TMP.store(p, Ordering::SeqCst);
+    }
+}
+
+#[cfg(all(feature = "mmap", not(any(target_os = "linux", target_os = "macos"))))]
+mod sigbus {
+    pub fn install(_: &str) {}
+    pub fn output(_: Option<&str>) {}
+}
+
+#[cfg(not(feature = "mmap"))]
+mod sigbus {
+    pub fn output(_: Option<&str>) {}
 }
 
 fn cmd_verify(args: &[String]) {
@@ -163,6 +267,7 @@ fn cmd_unpack(args: &[String]) {
     let out = &args[1];
     let tmp = format!("{out}.tmp-{}", std::process::id());
     susz::cleanup::register(&tmp);
+    sigbus::output(Some(&tmp));
     let res = (|| -> Result<(), susz::unpack::UnpackError> {
         let f = std::fs::File::create(&tmp)?;
         let mut w = std::io::BufWriter::with_capacity(1 << 20, f);
@@ -173,6 +278,7 @@ fn cmd_unpack(args: &[String]) {
         std::fs::rename(&tmp, out)?;
         Ok(())
     })();
+    sigbus::output(None);
     susz::cleanup::unregister();
     if let Err(e) = res {
         let _ = std::fs::remove_file(&tmp);

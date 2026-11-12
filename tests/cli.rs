@@ -157,3 +157,23 @@ fn anonymous_declaration_is_refused() {
     assert_eq!(c, 1);
     no_leftovers(&out);
 }
+
+// A mapped input truncated under the command: SIGBUS becomes exit 2, and
+// the partial output is removed.
+#[cfg(all(feature = "mmap", any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn truncated_mapped_input_exits_2_and_removes_output() {
+    let input = tmp("sigbus.susz");
+    std::fs::write(&input, vec![7u8; 1 << 20]).unwrap();
+    let out = tmp("sigbus.ndjson.tmp-x");
+    let st = bin()
+        .arg("__sigbus-test")
+        .arg(&input)
+        .arg(&out)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&st.stderr);
+    assert_eq!(st.status.code(), Some(2), "{err}");
+    assert!(err.contains("truncated or could not be read"), "{err}");
+    assert!(!out.exists());
+}
