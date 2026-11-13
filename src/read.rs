@@ -1964,6 +1964,26 @@ impl<'a> Main<'a> {
     #[inline(always)]
     fn step<V: Visit<'a>>(
         &mut self,
+        p: &mut usize,
+        at: usize,
+        v: &mut V,
+        live: bool,
+        sum: &mut Summary,
+        unread: &mut u64,
+    ) -> Result<Result<(), Stop<V::Error>>, E> {
+        let mut cur = Cur {
+            b: &self.bytes[..self.end],
+            p: at,
+        };
+        let c = &mut cur;
+        let r = self.step_at(c, at, v, live, sum, unread);
+        *p = cur.p;
+        r
+    }
+
+    #[inline(always)]
+    fn step_at<V: Visit<'a>>(
+        &mut self,
         c: &mut Cur<'a>,
         at: usize,
         v: &mut V,
@@ -2122,10 +2142,7 @@ impl<'a> Main<'a> {
     }
 
     fn run<V: Visit<'a>>(mut self, v: &mut V) -> Result<Decoded, Stop<V::Error>> {
-        let mut c = Cur {
-            b: &self.bytes[..self.end],
-            p: self.p,
-        };
+        let mut p = self.p;
         let mut sum = Summary {
             counts: self.counts,
             ..Default::default()
@@ -2133,19 +2150,19 @@ impl<'a> Main<'a> {
         let mut unread = 0;
         // the first error inside a block, reported after MAIN is checked
         let mut late: Option<Failure> = None;
-        while c.p < c.b.len() {
-            let at = c.p;
+        while p < self.end {
+            let at = p;
             self.rec += 1;
             if let Some((e, q)) = self.fast_expr(at) {
                 let id = self.st.exprs;
                 self.st.exprs += 1;
-                c.p = q;
+                p = q;
                 if late.is_none() {
                     v.expr(id, &e).map_err(Stop::Visitor)?;
                 }
                 continue;
             }
-            match self.step(&mut c, at, v, late.is_none(), &mut sum, &mut unread) {
+            match self.step(&mut p, at, v, late.is_none(), &mut sum, &mut unread) {
                 Ok(Ok(())) => {}
                 Ok(Err(Stop::File(f))) => late = Some(f),
                 Ok(Err(Stop::Visitor(e))) => return Err(Stop::Visitor(e)),
@@ -2160,7 +2177,7 @@ impl<'a> Main<'a> {
                 }
             }
         }
-        self.p = c.p;
+        self.p = p;
         self.finish().map_err(Stop::File)?;
         if let Some(f) = late {
             return Err(Stop::File(f));
@@ -2237,42 +2254,47 @@ impl<'a> Block<'a> {
         Some((e, at + o))
     }
 
-    fn run<E>(self, f: &mut impl FnMut(u32, &Expr<'a>) -> Result<(), E>) -> Result<(), Stop<E>> {
+    /// The `k`-th record at `at` through the checked reader: the
+    /// expression and where it ends, or the failure.
+    #[inline(never)]
+    fn slow(&self, at: usize, k: u64) -> Result<(Expr<'a>, usize), Failure> {
+        if at >= self.end {
+            return Err(self.fail(
+                Class::BlockCount,
+                at as u64,
+                k + 1,
+                format!("the block ends after {k} of {} expressions", self.b.exprs),
+            ));
+        }
         let mut c = Cur {
             b: &self.bytes[..self.end],
-            p: self.p,
+            p: at,
         };
+        match self.record_at(&mut c, k) {
+            Ok(e) => Ok((e, c.p)),
+            Err((class, msg)) => Err(self.fail(class, at as u64, k + 1, msg)),
+        }
+    }
+
+    fn run<E>(self, f: &mut impl FnMut(u32, &Expr<'a>) -> Result<(), E>) -> Result<(), Stop<E>> {
+        let mut p = self.p;
         let mut k = 0u64;
         while k < self.b.exprs {
-            let at = c.p;
-            if let Some((e, q)) = self.fast(at, k) {
-                // k < block-exprs <= MAX_BLOCK_EXPRS, checked in the record
+            // k < block-exprs <= MAX_BLOCK_EXPRS, checked in the record
+            if let Some((e, q)) = self.fast(p, k) {
                 f(k as u32, &e).map_err(Stop::Visitor)?;
-                c.p = q;
-                k += 1;
-                continue;
-            }
-            if at >= self.end {
-                return Err(Stop::File(self.fail(
-                    Class::BlockCount,
-                    at as u64,
-                    k + 1,
-                    format!("the block ends after {k} of {} expressions", self.b.exprs),
-                )));
-            }
-            match self.record_at(&mut c, k) {
-                // k < block-exprs <= MAX_BLOCK_EXPRS, checked in the record
-                Ok(e) => f(k as u32, &e).map_err(Stop::Visitor)?,
-                Err((class, msg)) => {
-                    return Err(Stop::File(self.fail(class, at as u64, k + 1, msg)))
-                }
+                p = q;
+            } else {
+                let (e, q) = self.slow(p, k).map_err(Stop::File)?;
+                f(k as u32, &e).map_err(Stop::Visitor)?;
+                p = q;
             }
             k += 1;
         }
-        if c.p != self.end {
+        if p != self.end {
             return Err(Stop::File(self.fail(
                 Class::BlockCount,
-                c.p as u64,
+                p as u64,
                 k + 1,
                 format!("bytes left after {} expressions", self.b.exprs),
             )));
