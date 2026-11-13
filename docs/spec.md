@@ -19,25 +19,23 @@ answers are now part of the sections below.
 
 ## 1. Rules
 
-1. **The file is input, not a witness.** A file holds structure only. It has
-   no hashes, no ranges of loose bound variables, no flags and no other
-   derived facts. A reader verifies every size, offset and count in the file
-   against the records it describes. If one of these hints disagrees with the
-   records, the reader rejects the file. A reader says `accepted` only after
-   it has read and verified the whole file.
-2. **Declaration order is content.** The order of the declaration records
-   decides admission to the environment and every "declared before" rule.
-   Layout never does.
-3. **Layout is a hint.** Which expressions sit in proof blocks, and where the
-   sections are, may change how fast a file is read. It never changes the
-   verdict.
-4. **Errors are deterministic.** The outcome of a full check depends only on
-   the file bytes, leaving out the content of the INDEX section. So does the
-   location of the reported error (section 8). Both are the same for any
-   number of workers, for eager or lazy decoding of proof blocks, and whether
-   or not the reader looks at INDEX.
-5. **Packing is deterministic.** For a given export and INDEX setting (on or
-   off), every canonical packer writes the same bytes (section 9).
+1. A reader trusts nothing in the file. The file stores the records and
+   nothing computed from them: no hashes, no ranges of loose bound variables,
+   no flags. Sizes, offsets and counts are there only to help reading, and a
+   reader checks each of them against the records. If one is wrong, the file
+   is rejected. A reader says `accepted` only after it has read and checked
+   the whole file.
+2. The order of the declaration records decides when each declaration enters
+   the environment, and what "declared before" means everywhere in this
+   spec. Nothing else in the layout does.
+3. Which expressions sit in proof blocks, and where the sections are, can
+   make a file faster or slower to read. It never changes the verdict.
+4. The outcome of a full check depends only on the file bytes, not counting
+   the content of the INDEX section. So does where the reported error is
+   (section 8). Neither changes with the number of workers, with decoding
+   proof blocks eagerly or lazily, or with whether the reader looks at INDEX.
+5. For a given export, with INDEX on or off, every canonical packer writes
+   the same bytes (section 9).
 
 ## 2. Outcomes
 

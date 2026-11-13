@@ -15,7 +15,7 @@ Why bother:
 - An optional index lets you find a declaration and its proof by name, if you
   only want to check part of a file.
 
-The file is input, not evidence. A checker that reads Susz trusts nothing in
+A checker that reads Susz trusts nothing in
 it and checks every count, offset and reference itself, so you don't have to
 trust the tool that wrote it either.
 
