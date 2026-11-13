@@ -19,3 +19,11 @@ jobs:
           SUSZ_REQUIRE_CORPORA: "1"
       - run: cargo clippy --release --locked --all-targets
       - run: cargo clippy --release --locked --all-targets --features mmap
+  msrv:
+    # The oldest Rust that rust-version in Cargo.toml promises.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.80
+      - run: cargo build --release --locked
+      - run: cargo build --release --locked --features mmap

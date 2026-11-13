@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Susz 1: a binary form of Lean 4 kernel exports (lean4export 3.1)"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/jasisz/susz"
+readme = "README.md"
+keywords = ["lean", "lean4", "kernel", "export", "binary-format"]
+categories = ["encoding", "parser-implementations", "mathematics", "command-line-utilities"]
+exclude = [".github/"]
 publish = false
 rust-version = "1.80"
 
@@ -14,7 +19,7 @@ memmap2 = { version = "0.9.10", optional = true }
 
 [features]
 # susz::open_mmap, and the `susz` binary maps the files it verifies or
-# unpacks instead of reading them: `cargo install --path . --features mmap`.
+# unpacks instead of reading them: `cargo install susz --features mmap`.
 mmap = ["dep:memmap2"]
 
 [profile.release]

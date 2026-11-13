@@ -29,9 +29,11 @@ reader that checks the structure, and a command-line tool.
 ## Install
 
 ```sh
-cargo install --path .
-cargo install --path . --features mmap   # verify and unpack map the file
+cargo install susz
+cargo install susz --features mmap   # verify and unpack map the file
 ```
+
+Or the latest from this repository: `cargo install --git https://github.com/jasisz/susz`.
 
 ## Usage
 
