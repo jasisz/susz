@@ -1,7 +1,7 @@
 // The walk back (owners, numbers, the frontier's items) and the writer of
 // the canonical layout (spec section 9).
 
-use super::pk::{rv, wv, Dec, Pk, FLAG, LOW, MAIN, NONE};
+use super::pk::{rv, wv, Pk, FLAG, LOW, MAIN, NONE};
 use super::{cant, inv, Stats, R};
 use crate::format;
 use std::io::Write;
@@ -84,7 +84,7 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
     unique_names(&pk)?;
     let mut name_f: Vec<u32> = vec![UNUSED; pk.names as usize];
     let mut level_f: Vec<u32> = vec![UNUSED; pk.levels as usize];
-    let mut m: u32 = 0;
+    let mm: u32;
     let mut cols = std::mem::take(&mut pk.cols);
     if cols.k.len() != n || cols.a.len() != n || cols.b.len() != n || pk.owner.len() != n {
         return Err(cant!("internal: expression counts disagree"));
@@ -93,82 +93,38 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
     // reaches it (through expressions T owns); every other one is in MAIN.
     // Children of owned expressions get FLAG: those in MAIN are frontier items.
     unsafe {
-        let ow = pk.owner.as_mut_ptr();
-        {
-            let sg = &cols;
-            let (kv, av, bv) = (sg.k.as_ptr(), sg.a.as_ptr(), sg.b.as_ptr());
-            let nmv = sg.names.as_ptr();
-            let mut ni = sg.names.len();
-            let mut li = sg.loffs.len();
-            for e in (0..n).rev() {
-                let (kind, ca, cb) = (*kv.add(e) as u32, *av.add(e), *bv.add(e));
-                let x = *ow.add(e);
-                let mut v = x & !FLAG;
-                if v == NONE {
-                    v = MAIN;
-                    *ow.add(e) = MAIN | (x & FLAG);
-                }
-                let mut c = Dec {
-                    k: kind,
-                    a: ca,
-                    b: cb,
-                };
-                if kind >= 2 {
-                    ni -= 1;
-                    c.k |= *nmv.add(ni) << 4;
-                } else if kind == 0 {
-                    li -= 1;
-                }
-                if v == MAIN {
-                    m += 1;
-                    if kind != 0 {
-                        let p1 = ow.add(c.a as usize);
-                        *p1 = MAIN | (*p1 & FLAG);
-                        let p2 = ow.add(c.b as usize);
-                        *p2 = MAIN | (*p2 & FLAG);
-                    } else {
-                        xchildren(
-                            &sg.x,
-                            *sg.loffs.get_unchecked(li) as usize,
-                            |c| {
-                                let p = ow.add(c as usize);
-                                *p = MAIN | (*p & FLAG);
-                            },
-                            |_| {},
-                            |_| {},
-                        );
-                    }
-                } else {
-                    let o = v;
-                    let mark = |c: u32| {
-                        let p = ow.add(c as usize);
-                        let w = *p & !FLAG;
-                        let nw = if w == NONE || w == o { o } else { MAIN };
-                        *p = nw | FLAG;
-                    };
-                    if kind != 0 {
-                        mark(c.a);
-                        mark(c.b);
-                        if kind >= 2 {
-                            *name_f.get_unchecked_mut((c.k >> 4) as usize) = USED;
-                        }
-                    } else {
-                        xchildren(
-                            &sg.x,
-                            *sg.loffs.get_unchecked(li) as usize,
-                            mark,
-                            |x| name_f[x as usize] = USED,
-                            |l| level_f[l as usize] = USED,
-                        );
-                    }
-                }
-            }
-            if ni != 0 || li != 0 {
-                return Err(cant!("internal: records disagree"));
-            }
+        let mut wk = Wk {
+            ow: pk.owner.as_mut_ptr(),
+            kv: cols.k.as_ptr(),
+            av: cols.a.as_ptr(),
+            bv: cols.b.as_ptr(),
+            nmv: cols.names.as_ptr(),
+            ni: cols.names.len(),
+            li: cols.loffs.len(),
+            m: 0,
+        };
+        let mut e = n;
+        while e > 0 {
+            let v = *wk.ow.add(e - 1) & !FLAG;
+            e = if v >= NONE {
+                walk_main(&mut wk, e, &cols.x, &cols.loffs)
+            } else {
+                walk_owned(
+                    &mut wk,
+                    e,
+                    v,
+                    &cols.x,
+                    &cols.loffs,
+                    &mut name_f,
+                    &mut level_f,
+                )
+            };
         }
+        if wk.ni != 0 || wk.li != 0 {
+            return Err(cant!("internal: records disagree"));
+        }
+        mm = wk.m;
     }
-    let mm = m;
 
     let mut sink = Sink { w, total: 0 };
     let mut hd: Vec<u8> = format::MAGIC.to_vec();
@@ -190,7 +146,7 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
     let mut out: Vec<u8> = Vec::with_capacity(FLUSH + (2 << 20));
     let mut accs: Vec<Acc> = (0..nd).map(|_| Acc::default()).collect();
     let mut pool: Vec<Vec<u8>> = Vec::new();
-    let (mut f_n, mut f_l, mut f_e) = (0u32, 0u32, 0u32);
+    let (mut f_n, mut f_l) = (0u32, 0u32);
     if name_f[0] == USED {
         out.extend_from_slice(&[19, 0, 1]);
         name_f[0] = f_n;
@@ -211,17 +167,23 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
     let (mut name_id, mut level_id) = (1usize, 1usize);
     let mut e: u32 = 0;
     let mut di: u32 = 0;
-    let mut mnext: u32 = 0;
     let mut lazy = 0u64;
     let s = &pk.stream[..];
     let ow = pk.owner.as_mut_ptr();
-    // the next binder's name, the next leaf
-    let (mut sn, mut sl) = (0usize, 0usize);
     // the k, b and names columns are given back below these
     let (mut rel, mut nrel) = (0usize, 0usize);
-    let (sk, sa, sb) = (cols.k.as_ptr(), cols.a.as_mut_ptr(), cols.b.as_ptr());
-    let snm = cols.names.as_ptr();
-    let slo = cols.loffs.as_ptr();
+    let mut em = Em {
+        ow,
+        sk: cols.k.as_ptr(),
+        sa: cols.a.as_mut_ptr(),
+        sb: cols.b.as_ptr(),
+        snm: cols.names.as_ptr(),
+        slo: cols.loffs.as_ptr(),
+        sn: 0,
+        sl: 0,
+        mnext: 0,
+        f_e: 0,
+    };
     let mut p = 0usize;
     while p < s.len() {
         if out.len() > FLUSH {
@@ -275,158 +237,29 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
                         super::give_back_range(&cols.b, rel, e as usize);
                         rel = e as usize;
                     }
-                    if sn - nrel >= 1 << 18 {
-                        super::give_back_range(&cols.names, nrel, sn);
-                        nrel = sn;
+                    if em.sn - nrel >= 1 << 18 {
+                        super::give_back_range(&cols.names, nrel, em.sn);
+                        nrel = em.sn;
                     }
                     let sx = &cols.x[..];
                     let cend = end.min(e.saturating_add(32768));
                     out.reserve(32768 * 24);
-                    unsafe {
-                        let mut ob = out.as_mut_ptr();
-                        let mut op = ob.add(out.len());
-                        // the block being written to, kept in locals
-                        let mut co = usize::MAX;
-                        let (mut cb, mut cp, mut ce) = (
-                            std::ptr::null_mut::<u8>(),
-                            std::ptr::null_mut::<u8>(),
-                            std::ptr::null_mut::<u8>(),
-                        );
-                        let mut ck = 0u32;
-                        macro_rules! save {
-                            () => {
-                                if co != usize::MAX {
-                                    let a = accs.get_unchecked_mut(co);
-                                    a.buf.set_len(cp.offset_from(cb) as usize);
-                                    a.k = ck;
+                    while e < cend {
+                        let x = unsafe { *ow.add(e as usize) };
+                        if x & MAIN != 0 {
+                            e = unsafe { main_run(&mut em, e, cend, &mut out, sx) };
+                        } else {
+                            let o = (x & LOW) as usize;
+                            let a = &mut accs[o];
+                            if a.k == 0 {
+                                if let Some(b) = pool.pop() {
+                                    a.buf = b;
                                 }
-                            };
-                        }
-                        macro_rules! reload {
-                            () => {
-                                let a = accs.get_unchecked_mut(co);
-                                cb = a.buf.as_mut_ptr();
-                                cp = cb.add(a.buf.len());
-                                ce = cb.add(a.buf.capacity());
-                            };
-                        }
-                        while e < cend {
-                            let x = *ow.add(e as usize);
-                            let i = e as usize;
-                            let (kind, xa, xb) = (*sk.add(i) as u32, *sa.add(i), *sb.add(i));
-                            let (c, lo) = if kind != 0 {
-                                let mut c = Dec {
-                                    k: kind,
-                                    a: xa,
-                                    b: xb,
-                                };
-                                if kind >= 2 {
-                                    c.k |= *snm.add(sn) << 4;
-                                    sn += 1;
-                                }
-                                (c, 0)
-                            } else {
-                                sl += 1;
-                                (Dec { k: 0, a: 0, b: 0 }, *slo.add(sl - 1) as usize)
-                            };
-                            if x & MAIN != 0 {
-                                let re = mnext;
-                                let mref = |c: u32| (re - *ow.add(c as usize)) as u64;
-                                match kind {
-                                    1 => {
-                                        *op = 10;
-                                        op = pv(op.add(1), mref(c.a));
-                                        op = pv(op, mref(c.b));
-                                    }
-                                    2..=9 => {
-                                        *op = if kind < 6 { 11 } else { 12 };
-                                        *op.add(1) = ((kind - 2) & 3) as u8;
-                                        op = pv(op.add(2), (c.k >> 4) as u64);
-                                        op = pv(op, mref(c.a));
-                                        op = pv(op, mref(c.b));
-                                    }
-                                    _ => {
-                                        out.set_len(op.offset_from(ob) as usize);
-                                        main_other(sx, lo, &mut out, mref);
-                                        out.reserve(32768 * 24);
-                                        ob = out.as_mut_ptr();
-                                        op = ob.add(out.len());
-                                    }
-                                }
-                                if x & FLAG != 0 {
-                                    *op = 19;
-                                    *op.add(1) = 2;
-                                    *op.add(2) = 1;
-                                    op = op.add(3);
-                                    *sa.add(i) = f_e;
-                                    f_e += 1;
-                                }
-                                *ow.add(i) = mnext;
-                                mnext += 1;
-                            } else {
-                                let o = (x & LOW) as usize;
-                                if o != co {
-                                    save!();
-                                    co = o;
-                                    let a = accs.get_unchecked_mut(o);
-                                    if a.k == 0 {
-                                        if let Some(b) = pool.pop() {
-                                            a.buf = b;
-                                        }
-                                    }
-                                    a.buf.reserve(64);
-                                    ck = a.k;
-                                    reload!();
-                                }
-                                if (ce.offset_from(cp) as usize) < 64 {
-                                    let a = accs.get_unchecked_mut(co);
-                                    a.buf.set_len(cp.offset_from(cb) as usize);
-                                    let l = a.buf.len();
-                                    a.buf.reserve(l.max(256));
-                                    reload!();
-                                }
-                                let kloc = ck;
-                                let er = |c: u32| -> u64 {
-                                    let z = *sa.add(c as usize);
-                                    if *ow.add(c as usize) == OWNED {
-                                        (kloc - z) as u64
-                                    } else {
-                                        // a frontier item (spec 9)
-                                        kloc as u64 + 1 + z as u64
-                                    }
-                                };
-                                match kind {
-                                    1 => {
-                                        *cp = 10;
-                                        cp = pv(cp.add(1), er(c.a));
-                                        cp = pv(cp, er(c.b));
-                                    }
-                                    2..=9 => {
-                                        *cp = if kind < 6 { 11 } else { 12 };
-                                        *cp.add(1) = ((kind - 2) & 3) as u8;
-                                        cp = pv(
-                                            cp.add(2),
-                                            *name_f.as_ptr().add((c.k >> 4) as usize) as u64,
-                                        );
-                                        cp = pv(cp, er(c.a));
-                                        cp = pv(cp, er(c.b));
-                                    }
-                                    _ => {
-                                        let a = accs.get_unchecked_mut(co);
-                                        a.buf.set_len(cp.offset_from(cb) as usize);
-                                        owned_other(sx, lo, &mut a.buf, &er, &name_f, &level_f);
-                                        a.buf.reserve(64);
-                                        reload!();
-                                    }
-                                }
-                                *ow.add(i) = OWNED;
-                                *sa.add(i) = kloc;
-                                ck += 1;
                             }
-                            e += 1;
+                            e = unsafe {
+                                owned_run(&mut em, e, cend, o as u32, a, sx, &name_f, &level_f)
+                            };
                         }
-                        save!();
-                        out.set_len(op.offset_from(ob) as usize);
                     }
                 }
             }
@@ -440,6 +273,7 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
                     ix_kind.push(if is_lazy { 6 } else { kind });
                 }
                 out.push(18);
+                let mnext = em.mnext;
                 let newid_back = |c: u32| -> u64 { (mnext - pk.owner[c as usize]) as u64 };
                 if is_lazy {
                     let acc = std::mem::take(&mut accs[di as usize]);
@@ -499,11 +333,11 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
             t => return Err(cant!("internal: bad stream tag {t} at {p}")),
         }
     }
-    if mnext != mm || e as usize != n || di as usize != nd {
+    if em.mnext != mm || e as usize != n || di as usize != nd {
         return Err(cant!("internal: counts disagree"));
     }
     // what INDEX and the rest no longer need
-    if sn != cols.names.len() || sl != cols.loffs.len() {
+    if em.sn != cols.names.len() || em.sl != cols.loffs.len() {
         return Err(cant!("internal: records disagree"));
     }
     cols.give_back();
@@ -563,6 +397,276 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
         file_bytes: sink.total,
         parallel: false,
     })
+}
+
+// The walk back's columns and where it is in them.
+struct Wk {
+    ow: *mut u32,
+    kv: *const u8,
+    av: *const u32,
+    bv: *const u32,
+    nmv: *const u32,
+    // the binder names and leaves before the expression reached
+    ni: usize,
+    li: usize,
+    // expressions in MAIN
+    m: u32,
+}
+
+// Back from expression e - 1 while the expressions are in MAIN (owned by no
+// declaration, or by several): their children are in MAIN too. Returns how
+// many expressions are left.
+#[inline(never)]
+unsafe fn walk_main(wk: &mut Wk, mut e: usize, xs: &[u8], loffs: &[u64]) -> usize {
+    let (ow, kv, av, bv) = (wk.ow, wk.kv, wk.av, wk.bv);
+    let (mut ni, mut li, mut m) = (wk.ni, wk.li, wk.m);
+    while e > 0 {
+        let i = e - 1;
+        let x = *ow.add(i);
+        if x & !FLAG < NONE {
+            break;
+        }
+        *ow.add(i) = MAIN | (x & FLAG);
+        m += 1;
+        let kind = *kv.add(i);
+        if kind != 0 {
+            if kind >= 2 {
+                ni -= 1;
+            }
+            let p1 = ow.add(*av.add(i) as usize);
+            *p1 = MAIN | (*p1 & FLAG);
+            let p2 = ow.add(*bv.add(i) as usize);
+            *p2 = MAIN | (*p2 & FLAG);
+        } else {
+            li -= 1;
+            xchildren(
+                xs,
+                *loffs.get_unchecked(li) as usize,
+                |c| {
+                    let p = ow.add(c as usize);
+                    *p = MAIN | (*p & FLAG);
+                },
+                |_| {},
+                |_| {},
+            );
+        }
+        e = i;
+    }
+    wk.ni = ni;
+    wk.li = li;
+    wk.m = m;
+    e
+}
+
+// Back from expression e - 1 while declaration o owns the expressions: each
+// child is owned by o too unless something else reaches it, and gets FLAG.
+#[inline(never)]
+unsafe fn walk_owned(
+    wk: &mut Wk,
+    mut e: usize,
+    o: u32,
+    xs: &[u8],
+    loffs: &[u64],
+    name_f: &mut [u32],
+    level_f: &mut [u32],
+) -> usize {
+    let (ow, kv, av, bv, nmv) = (wk.ow, wk.kv, wk.av, wk.bv, wk.nmv);
+    let (mut ni, mut li) = (wk.ni, wk.li);
+    let mark = |c: u32| {
+        let p = ow.add(c as usize);
+        let w = *p & !FLAG;
+        let nw = if w == NONE || w == o { o } else { MAIN };
+        *p = nw | FLAG;
+    };
+    while e > 0 {
+        let i = e - 1;
+        if *ow.add(i) & !FLAG != o {
+            break;
+        }
+        let kind = *kv.add(i);
+        if kind != 0 {
+            mark(*av.add(i));
+            mark(*bv.add(i));
+            if kind >= 2 {
+                ni -= 1;
+                *name_f.get_unchecked_mut(*nmv.add(ni) as usize) = USED;
+            }
+        } else {
+            li -= 1;
+            xchildren(
+                xs,
+                *loffs.get_unchecked(li) as usize,
+                mark,
+                |x| name_f[x as usize] = USED,
+                |l| level_f[l as usize] = USED,
+            );
+        }
+        e = i;
+    }
+    wk.ni = ni;
+    wk.li = li;
+    e
+}
+
+// The columns the writer walks forward, and where it is in them.
+struct Em {
+    ow: *mut u32,
+    sk: *const u8,
+    sa: *mut u32,
+    sb: *const u32,
+    snm: *const u32,
+    slo: *const u64,
+    // the next binder's name, the next leaf
+    sn: usize,
+    sl: usize,
+    // the next MAIN number, the next frontier item
+    mnext: u32,
+    f_e: u32,
+}
+
+// The MAIN expressions from e on, below cend: their records into out (room
+// for 24 bytes each reserved). Returns the first expression not in MAIN.
+#[inline(never)]
+unsafe fn main_run(em: &mut Em, mut e: u32, cend: u32, out: &mut Vec<u8>, sx: &[u8]) -> u32 {
+    let (ow, sk, sa, sb, snm, slo) = (em.ow, em.sk, em.sa, em.sb, em.snm, em.slo);
+    let (mut sn, mut sl, mut mnext, mut f_e) = (em.sn, em.sl, em.mnext, em.f_e);
+    let mut ob = out.as_mut_ptr();
+    let mut op = ob.add(out.len());
+    while e < cend {
+        let i = e as usize;
+        let x = *ow.add(i);
+        if x & MAIN == 0 {
+            break;
+        }
+        let kind = *sk.add(i) as u32;
+        let re = mnext;
+        let mref = |c: u32| (re - *ow.add(c as usize)) as u64;
+        match kind {
+            1 => {
+                *op = 10;
+                op = pv(op.add(1), mref(*sa.add(i)));
+                op = pv(op, mref(*sb.add(i)));
+            }
+            2..=9 => {
+                *op = if kind < 6 { 11 } else { 12 };
+                *op.add(1) = ((kind - 2) & 3) as u8;
+                op = pv(op.add(2), *snm.add(sn) as u64);
+                sn += 1;
+                op = pv(op, mref(*sa.add(i)));
+                op = pv(op, mref(*sb.add(i)));
+            }
+            _ => {
+                let lo = *slo.add(sl) as usize;
+                sl += 1;
+                out.set_len(op.offset_from(ob) as usize);
+                main_other(sx, lo, out, mref);
+                out.reserve(32768 * 24);
+                ob = out.as_mut_ptr();
+                op = ob.add(out.len());
+            }
+        }
+        if x & FLAG != 0 {
+            *op = 19;
+            *op.add(1) = 2;
+            *op.add(2) = 1;
+            op = op.add(3);
+            *sa.add(i) = f_e;
+            f_e += 1;
+        }
+        *ow.add(i) = mnext;
+        mnext += 1;
+        e += 1;
+    }
+    out.set_len(op.offset_from(ob) as usize);
+    em.sn = sn;
+    em.sl = sl;
+    em.mnext = mnext;
+    em.f_e = f_e;
+    e
+}
+
+// The expressions from e on, below cend, that block o owns: their records
+// into its accumulator. Returns the first expression it does not own.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+unsafe fn owned_run(
+    em: &mut Em,
+    mut e: u32,
+    cend: u32,
+    o: u32,
+    a: &mut Acc,
+    sx: &[u8],
+    name_f: &[u32],
+    level_f: &[u32],
+) -> u32 {
+    let (ow, sk, sa, sb, snm, slo) = (em.ow, em.sk, em.sa, em.sb, em.snm, em.slo);
+    let (mut sn, mut sl) = (em.sn, em.sl);
+    let mut ck = a.k;
+    a.buf.reserve(64);
+    let mut cb = a.buf.as_mut_ptr();
+    let mut cp = cb.add(a.buf.len());
+    let mut ce = cb.add(a.buf.capacity());
+    let nf = name_f.as_ptr();
+    while e < cend {
+        let i = e as usize;
+        // FLAG may be set
+        if *ow.add(i) & !FLAG != o {
+            break;
+        }
+        if (ce.offset_from(cp) as usize) < 64 {
+            a.buf.set_len(cp.offset_from(cb) as usize);
+            let l = a.buf.len();
+            a.buf.reserve(l.max(256));
+            cb = a.buf.as_mut_ptr();
+            cp = cb.add(a.buf.len());
+            ce = cb.add(a.buf.capacity());
+        }
+        let kind = *sk.add(i) as u32;
+        let kloc = ck;
+        let er = |c: u32| -> u64 {
+            let z = *sa.add(c as usize);
+            if *ow.add(c as usize) == OWNED {
+                (kloc - z) as u64
+            } else {
+                // a frontier item (spec 9)
+                kloc as u64 + 1 + z as u64
+            }
+        };
+        match kind {
+            1 => {
+                *cp = 10;
+                cp = pv(cp.add(1), er(*sa.add(i)));
+                cp = pv(cp, er(*sb.add(i)));
+            }
+            2..=9 => {
+                *cp = if kind < 6 { 11 } else { 12 };
+                *cp.add(1) = ((kind - 2) & 3) as u8;
+                cp = pv(cp.add(2), *nf.add(*snm.add(sn) as usize) as u64);
+                sn += 1;
+                cp = pv(cp, er(*sa.add(i)));
+                cp = pv(cp, er(*sb.add(i)));
+            }
+            _ => {
+                let lo = *slo.add(sl) as usize;
+                sl += 1;
+                a.buf.set_len(cp.offset_from(cb) as usize);
+                owned_other(sx, lo, &mut a.buf, &er, name_f, level_f);
+                a.buf.reserve(64);
+                cb = a.buf.as_mut_ptr();
+                cp = cb.add(a.buf.len());
+                ce = cb.add(a.buf.capacity());
+            }
+        }
+        *ow.add(i) = OWNED;
+        *sa.add(i) = kloc;
+        ck += 1;
+        e += 1;
+    }
+    a.buf.set_len(cp.offset_from(cb) as usize);
+    a.k = ck;
+    em.sn = sn;
+    em.sl = sl;
+    e
 }
 
 // The INDEX section (spec 6a.1).

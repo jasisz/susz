@@ -177,14 +177,6 @@ impl Cols {
     }
 }
 
-// An application or binder read back: kind and name (as k), children.
-#[derive(Clone, Copy)]
-pub struct Dec {
-    pub k: u32,
-    pub a: u32,
-    pub b: u32,
-}
-
 unsafe impl Send for Pk {}
 
 // Stream records: 1,2 names and 3..6 levels as in Susz v0; 20 K: a run of K
