@@ -9,7 +9,6 @@ readme = "README.md"
 keywords = ["lean", "lean4", "kernel", "export", "binary-format"]
 categories = ["encoding", "parser-implementations", "mathematics", "command-line-utilities"]
 exclude = [".github/"]
-publish = false
 rust-version = "1.80"
 
 [dependencies]
