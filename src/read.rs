@@ -2070,7 +2070,7 @@ impl<'a> Main<'a> {
     /// The fast path of one MAIN expression record at `at` (see [`fv`]):
     /// the expression and where the record ends.
     #[inline(always)]
-    fn fast_expr(&self, at: usize, exprs: u32) -> Option<(Expr<'a>, usize)> {
+    fn fast_expr(&self, at: usize, [names, levels, exprs]: [u32; 3]) -> Option<(Expr<'a>, usize)> {
         let win: &[u8; WIN] = self.bytes.get(at..at + WIN)?.try_into().unwrap();
         let mut o = 1;
         let e = match win[0] {
@@ -2085,7 +2085,7 @@ impl<'a> Main<'a> {
                 }
                 o = 2;
                 let n = fw(win, &mut o)?;
-                if n >= self.st.names as u64 {
+                if n >= names as u64 {
                     return None;
                 }
                 let t = Self::fback(exprs, fw(win, &mut o)?)?;
@@ -2098,7 +2098,7 @@ impl<'a> Main<'a> {
             }
             9 => {
                 let n = fw(win, &mut o)?;
-                if n >= self.st.names as u64 {
+                if n >= names as u64 {
                     return None;
                 }
                 // at most 5 levels: the record stays within the window
@@ -2107,7 +2107,7 @@ impl<'a> Main<'a> {
                     return None;
                 }
                 let start = o;
-                let levels = self.st.levels as u64;
+                let levels = levels as u64;
                 for _ in 0..k {
                     if fw(win, &mut o)? >= levels {
                         return None;
@@ -2127,7 +2127,7 @@ impl<'a> Main<'a> {
             }
             8 => {
                 let l = fw(win, &mut o)?;
-                if l >= self.st.levels as u64 {
+                if l >= levels as u64 {
                     return None;
                 }
                 Expr::Sort(l as u32)
@@ -2195,10 +2195,11 @@ impl<'a> Main<'a> {
         // kept here, not in the state, while records take the fast path
         let mut rec = self.rec;
         let mut exprs = self.st.exprs;
+        let (mut names, mut levels) = (self.st.names, self.st.levels);
         while p < self.end {
             let at = p;
             rec += 1;
-            if let Some((e, q)) = self.fast_expr(at, exprs) {
+            if let Some((e, q)) = self.fast_expr(at, [names, levels, exprs]) {
                 let id = exprs;
                 exprs += 1;
                 p = q;
@@ -2217,6 +2218,7 @@ impl<'a> Main<'a> {
             self.st.exprs = exprs;
             let r = self.step(&mut p, at, v, late.is_none(), &mut sum, &mut unread);
             exprs = self.st.exprs;
+            (names, levels) = (self.st.names, self.st.levels);
             match r {
                 Ok(Ok(())) => {}
                 Ok(Err(Stop::File(f))) => late = Some(f),
