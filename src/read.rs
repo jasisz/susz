@@ -2183,6 +2183,39 @@ impl<'a> Main<'a> {
         Some((kind, index, item, at + o))
     }
 
+    /// The fast path of a name record at `at` (see [`fv`]): prefix,
+    /// component, the component's offset (for a string) and where the
+    /// record ends.
+    #[inline(always)]
+    fn fast_name(&self, at: usize, names: u32) -> Option<(u32, Component<'a>, usize, usize)> {
+        let win: &[u8; WIN] = self.bytes.get(at..at + WIN)?.try_into().unwrap();
+        let tag = win[0];
+        if !(1..=2).contains(&tag) || names == u32::MAX {
+            return None;
+        }
+        let mut o = 1;
+        let pre = fw(win, &mut o)?;
+        if pre >= names as u64 {
+            return None;
+        }
+        let part = fw(win, &mut o)?;
+        if tag == 2 {
+            if at + o > self.end {
+                return None;
+            }
+            return Some((pre as u32, Component::Num(part), 0, at + o));
+        }
+        // a string of `part` bytes, in the section
+        let len = usize::try_from(part).ok()?;
+        let s = self.bytes.get(at + o..)?.get(..len)?;
+        let end = at + o + len;
+        if end > self.end {
+            return None;
+        }
+        let s = std::str::from_utf8(s).ok()?;
+        Some((pre as u32, Component::Str(s), at + o, end))
+    }
+
     fn run<V: Visit<'a>>(mut self, v: &mut V) -> Result<Decoded, Stop<V::Error>> {
         let mut p = self.p;
         let mut sum = Summary {
@@ -2214,6 +2247,28 @@ impl<'a> Main<'a> {
                     v.frontier(kind, index, item).map_err(Stop::Visitor)?;
                 }
                 continue;
+            }
+            if let Some((pre, part, off, q)) = self.fast_name(at, names) {
+                let r = self.new_name(pre, part, off as u64);
+                names = self.st.names;
+                match r {
+                    Ok(id) => {
+                        p = q;
+                        if late.is_none() {
+                            v.name(id, pre, part).map_err(Stop::Visitor)?;
+                        }
+                        continue;
+                    }
+                    Err((class, msg)) => {
+                        return Err(Stop::File(Failure::new(
+                            class,
+                            Place::Section(format::SEC_MAIN),
+                            at as u64,
+                            rec,
+                            msg,
+                        )))
+                    }
+                }
             }
             self.st.exprs = exprs;
             let r = self.step(&mut p, at, v, late.is_none(), &mut sum, &mut unread);
