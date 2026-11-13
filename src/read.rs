@@ -2141,6 +2141,44 @@ impl<'a> Main<'a> {
         Some((e, at + o))
     }
 
+    /// The fast path of a frontier record at `at` (see [`fv`]): kind,
+    /// entry index, item and where the record ends. The entry is added
+    /// only when every check passes.
+    #[inline(always)]
+    fn fast_frontier(&mut self, at: usize) -> Option<(u8, u32, u32, usize)> {
+        let win: &[u8; WIN] = self.bytes.get(at..at + WIN)?.try_into().unwrap();
+        if win[0] != 19 {
+            return None;
+        }
+        let kind = win[1];
+        if kind > 2 {
+            return None;
+        }
+        let mut o = 2;
+        let d = fw(win, &mut o)?;
+        if at + o > self.end {
+            return None;
+        }
+        let next = self.st.next(kind) as u64;
+        if d.wrapping_sub(1) >= next {
+            return None;
+        }
+        let item = (next - d) as u32;
+        let bits = &mut self.st.listed[kind as usize];
+        let (w, b) = ((item / 64) as usize, item % 64);
+        if bits.len() <= w {
+            bits.resize(w + 1, 0);
+        }
+        if bits[w] >> b & 1 != 0 {
+            return None;
+        }
+        bits[w] |= 1 << b;
+        let t = &mut self.st.frontier[kind as usize];
+        let index = t.len() as u32;
+        t.push(item);
+        Some((kind, index, item, at + o))
+    }
+
     fn run<V: Visit<'a>>(mut self, v: &mut V) -> Result<Decoded, Stop<V::Error>> {
         let mut p = self.p;
         let mut sum = Summary {
@@ -2159,6 +2197,13 @@ impl<'a> Main<'a> {
                 p = q;
                 if late.is_none() {
                     v.expr(id, &e).map_err(Stop::Visitor)?;
+                }
+                continue;
+            }
+            if let Some((kind, index, item, q)) = self.fast_frontier(at) {
+                p = q;
+                if late.is_none() {
+                    v.frontier(kind, index, item).map_err(Stop::Visitor)?;
                 }
                 continue;
             }
