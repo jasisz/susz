@@ -2058,8 +2058,8 @@ impl<'a> Main<'a> {
 
     /// A MAIN expression id from a back distance, for the fast path.
     #[inline(always)]
-    fn fback(&self, d: u64) -> Option<Ref> {
-        let n = self.st.exprs as u64;
+    fn fback(n: u32, d: u64) -> Option<Ref> {
+        let n = n as u64;
         if d.wrapping_sub(1) < n {
             Some(Ref::Main((n - d) as u32))
         } else {
@@ -2070,13 +2070,13 @@ impl<'a> Main<'a> {
     /// The fast path of one MAIN expression record at `at` (see [`fv`]):
     /// the expression and where the record ends.
     #[inline(always)]
-    fn fast_expr(&self, at: usize) -> Option<(Expr<'a>, usize)> {
+    fn fast_expr(&self, at: usize, exprs: u32) -> Option<(Expr<'a>, usize)> {
         let win: &[u8; WIN] = self.bytes.get(at..at + WIN)?.try_into().unwrap();
         let mut o = 1;
         let e = match win[0] {
             10 => {
-                let f = self.fback(fw(win, &mut o)?)?;
-                Expr::App(f, self.fback(fw(win, &mut o)?)?)
+                let f = Self::fback(exprs, fw(win, &mut o)?)?;
+                Expr::App(f, Self::fback(exprs, fw(win, &mut o)?)?)
             }
             tag @ (11 | 12) => {
                 let bi = win[1];
@@ -2088,8 +2088,8 @@ impl<'a> Main<'a> {
                 if n >= self.st.names as u64 {
                     return None;
                 }
-                let t = self.fback(fw(win, &mut o)?)?;
-                let body = self.fback(fw(win, &mut o)?)?;
+                let t = Self::fback(exprs, fw(win, &mut o)?)?;
+                let body = Self::fback(exprs, fw(win, &mut o)?)?;
                 if tag == 11 {
                     Expr::Lam(bi, n as u32, t, body)
                 } else {
@@ -2135,7 +2135,7 @@ impl<'a> Main<'a> {
             7 => Expr::BVar(fw(win, &mut o)?),
             _ => return None,
         };
-        if at + o > self.end || self.st.exprs == u32::MAX {
+        if at + o > self.end || exprs == u32::MAX {
             return None;
         }
         Some((e, at + o))
@@ -2145,7 +2145,7 @@ impl<'a> Main<'a> {
     /// entry index, item and where the record ends. The entry is added
     /// only when every check passes.
     #[inline(always)]
-    fn fast_frontier(&mut self, at: usize) -> Option<(u8, u32, u32, usize)> {
+    fn fast_frontier(&mut self, at: usize, exprs: u32) -> Option<(u8, u32, u32, usize)> {
         let win: &[u8; WIN] = self.bytes.get(at..at + WIN)?.try_into().unwrap();
         if win[0] != 19 {
             return None;
@@ -2159,7 +2159,11 @@ impl<'a> Main<'a> {
         if at + o > self.end {
             return None;
         }
-        let next = self.st.next(kind) as u64;
+        let next = match kind {
+            0 => self.st.names,
+            1 => self.st.levels,
+            _ => exprs,
+        } as u64;
         if d.wrapping_sub(1) >= next {
             return None;
         }
@@ -2188,26 +2192,32 @@ impl<'a> Main<'a> {
         let mut unread = 0;
         // the first error inside a block, reported after MAIN is checked
         let mut late: Option<Failure> = None;
+        // kept here, not in the state, while records take the fast path
+        let mut rec = self.rec;
+        let mut exprs = self.st.exprs;
         while p < self.end {
             let at = p;
-            self.rec += 1;
-            if let Some((e, q)) = self.fast_expr(at) {
-                let id = self.st.exprs;
-                self.st.exprs += 1;
+            rec += 1;
+            if let Some((e, q)) = self.fast_expr(at, exprs) {
+                let id = exprs;
+                exprs += 1;
                 p = q;
                 if late.is_none() {
                     v.expr(id, &e).map_err(Stop::Visitor)?;
                 }
                 continue;
             }
-            if let Some((kind, index, item, q)) = self.fast_frontier(at) {
+            if let Some((kind, index, item, q)) = self.fast_frontier(at, exprs) {
                 p = q;
                 if late.is_none() {
                     v.frontier(kind, index, item).map_err(Stop::Visitor)?;
                 }
                 continue;
             }
-            match self.step(&mut p, at, v, late.is_none(), &mut sum, &mut unread) {
+            self.st.exprs = exprs;
+            let r = self.step(&mut p, at, v, late.is_none(), &mut sum, &mut unread);
+            exprs = self.st.exprs;
+            match r {
                 Ok(Ok(())) => {}
                 Ok(Err(Stop::File(f))) => late = Some(f),
                 Ok(Err(Stop::Visitor(e))) => return Err(Stop::Visitor(e)),
@@ -2216,12 +2226,14 @@ impl<'a> Main<'a> {
                         class,
                         Place::Section(format::SEC_MAIN),
                         at as u64,
-                        self.rec,
+                        rec,
                         msg,
                     )))
                 }
             }
         }
+        self.rec = rec;
+        self.st.exprs = exprs;
         self.p = p;
         self.finish().map_err(Stop::File)?;
         if let Some(f) = late {
