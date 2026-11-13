@@ -292,3 +292,145 @@ fn mdata_is_dropped() {
         susz::digest::of_susz(&x).unwrap()
     );
 }
+
+// Lines in lean4export's canonical form are read by position, any other
+// through the JSON parser: an export written otherwise (other spacing or key
+// order, escapes, leading zeros, long names) packs to the same bytes.
+#[test]
+fn fast_and_slow_paths_agree() {
+    let head = "{\"meta\":{\"format\":{\"version\":\"3.1.0\"}}}\n";
+    // names of every length up to 24, some not ASCII, crossing word bounds
+    let mut names: Vec<String> = Vec::new();
+    for n in 1..=24usize {
+        let s: String = (0..n).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+        names.push(s);
+    }
+    names.push("é".into());
+    names.push("xℕ".into());
+    names.push("αβγδεζηθικ".into());
+    names.push("a\"b".into());
+    names.push("back\\slash".into());
+    names.push("new\nline".into());
+    let json_str = |s: &str| -> String {
+        let mut o = String::from("\"");
+        for c in s.chars() {
+            match c {
+                '"' => o.push_str("\\\""),
+                '\\' => o.push_str("\\\\"),
+                '\n' => o.push_str("\\n"),
+                c => o.push(c),
+            }
+        }
+        o.push('"');
+        o
+    };
+    // every character as \uXXXX (surrogate pairs above the BMP)
+    let json_u = |s: &str| -> String {
+        let mut o = String::from("\"");
+        for c in s.chars() {
+            let mut b = [0u16; 2];
+            for u in c.encode_utf16(&mut b) {
+                o.push_str(&format!("\\u{:04x}", u));
+            }
+        }
+        o.push('"');
+        o
+    };
+    let mut canon = String::from(head);
+    let mut other = String::from(head);
+    for (i, s) in names.iter().enumerate() {
+        let id = i + 1;
+        canon.push_str(&format!(
+            "{{\"in\":{id},\"str\":{{\"pre\":0,\"str\":{}}}}}\n",
+            json_str(s)
+        ));
+        other.push_str(&format!(
+            "{{ \"str\" : {{\"str\":{},\"pre\":0}}, \"in\":{id} }}\n",
+            json_u(s)
+        ));
+    }
+    let nn = names.len();
+    let mut ce = Vec::new();
+    let mut oe = Vec::new();
+    ce.push("{\"ie\":0,\"sort\":0}".to_string());
+    oe.push("{\"sort\":0,\"ie\":0}".to_string());
+    let bis = ["default", "implicit", "instImplicit", "strictImplicit"];
+    let mut e = 1usize;
+    for round in 0..40usize {
+        let n = round % nn + 1;
+        let bi = bis[round % 4];
+        // an application
+        ce.push(format!(
+            "{{\"app\":{{\"arg\":{},\"fn\":{}}},\"ie\":{e}}}",
+            e - 1,
+            e / 2
+        ));
+        oe.push(match round % 3 {
+            0 => format!(
+                "{{\"app\":{{\"fn\":{},\"arg\":{}}},\"ie\":{e}}}",
+                e / 2,
+                e - 1
+            ),
+            1 => format!(
+                "{{\"app\": {{\"arg\":{:020},\"fn\":{}}},\"ie\":{e}}}",
+                e - 1,
+                e / 2
+            ),
+            _ => format!(
+                "{{\"ie\":{e},\"app\":{{\"arg\":{},\"fn\":{:019}}}}}",
+                e - 1,
+                e / 2
+            ),
+        });
+        e += 1;
+        // a pi and a lambda
+        ce.push(format!(
+            "{{\"forallE\":{{\"binderInfo\":\"{bi}\",\"body\":{},\"name\":{n},\"type\":{}}},\"ie\":{e}}}",
+            e - 1,
+            e / 3
+        ));
+        oe.push(format!(
+            "{{\"ie\":{e},\"forallE\":{{\"name\":{n},\"binderInfo\":\"{bi}\",\"type\":{},\"body\":{}}}}}",
+            e / 3,
+            e - 1
+        ));
+        e += 1;
+        ce.push(format!(
+            "{{\"ie\":{e},\"lam\":{{\"binderInfo\":\"{bi}\",\"body\":{},\"name\":{n},\"type\":{}}}}}",
+            e - 1,
+            e - 2
+        ));
+        oe.push(format!(
+            "{{\"ie\":{:03},\"lam\":{{\"binderInfo\":\"{bi}\",\"body\":{},\"name\":{n},\"type\":{}}}}}",
+            e,
+            e - 1,
+            e - 2
+        ));
+        e += 1;
+    }
+    for (c, o) in ce.iter().zip(&oe) {
+        canon.push_str(c);
+        canon.push('\n');
+        other.push_str(o);
+        other.push('\n');
+    }
+    let last = e - 1;
+    for (i, _) in names.iter().enumerate() {
+        let d = format!(
+            "{{\"axiom\":{{\"isUnsafe\":false,\"levelParams\":[],\"name\":{},\"type\":{last}}}}}\n",
+            i + 1
+        );
+        canon.push_str(&d);
+        other.push_str(&d);
+    }
+    let (pa, pb) = (tmp("paths-canon.ndjson"), tmp("paths-other.ndjson"));
+    std::fs::write(&pa, &canon).unwrap();
+    std::fs::write(&pb, &other).unwrap();
+    for t in [1, 4] {
+        let (x, _) = pack_to_vec(&pa, &opts(true, t)).unwrap();
+        let (y, _) = pack_to_vec(&pb, &opts(true, t)).unwrap();
+        assert!(x == y, "{t} threads: the two writings pack differently");
+    }
+    let _ = std::fs::remove_file(&pa);
+    let _ = std::fs::remove_file(&pb);
+}
