@@ -34,10 +34,20 @@ fn hash_str(pre: u32, s: &[u8]) -> u32 {
     for w in &mut c {
         h = mix(h, u64::from_le_bytes(w.try_into().unwrap()));
     }
+    // the last bytes (fewer than 8) in one word, which with the length
+    // tells them apart
     let r = c.remainder();
-    let mut t = [0u8; 8];
-    t[..r.len()].copy_from_slice(r);
-    h = mix(h, u64::from_le_bytes(t) ^ ((s.len() as u64) << 56));
+    let n = r.len();
+    let t = if n >= 4 {
+        let lo = u32::from_le_bytes(r[..4].try_into().unwrap()) as u64;
+        let hi = u32::from_le_bytes(r[n - 4..].try_into().unwrap()) as u64;
+        lo | (hi << 32)
+    } else if n > 0 {
+        r[0] as u64 | ((r[n / 2] as u64) << 8) | ((r[n - 1] as u64) << 16)
+    } else {
+        0
+    };
+    h = mix(h, t ^ ((s.len() as u64) << 56));
     (h >> 32) as u32
 }
 

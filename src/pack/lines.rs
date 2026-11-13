@@ -133,22 +133,33 @@ fn nums(b: &[u8], mut p: usize, out: &mut Vec<u64>) -> Option<usize> {
 
 // The body of a string at p (just after its quote) when it has no escape:
 // (start, end) with end at the closing quote; None at a backslash or newline.
+// Eight bytes at a time: b has PAD readable bytes past the line's newline.
 #[inline(always)]
 fn plain_str(b: &[u8], p: usize) -> Option<(usize, usize)> {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    // high bit of each byte that is zero (exact up to the first one)
+    let zero = |x: u64| x.wrapping_sub(ONES) & !x & HIGH;
     let mut q = p;
-    let mut hi = 0u8;
+    let mut hi = 0u64;
     loop {
-        let c = at(b, q);
-        if c == b'"' {
+        let w = ld8(b, q);
+        let m = zero(w ^ (ONES * b'"' as u64))
+            | zero(w ^ (ONES * b'\\' as u64))
+            | zero(w ^ (ONES * b'\n' as u64));
+        if m != 0 {
+            let k = m.trailing_zeros() as usize / 8;
+            hi |= w & ((1u64 << (8 * k)) - 1);
+            q += k;
             break;
         }
-        if c == b'\\' || c == b'\n' {
-            return None;
-        }
-        hi |= c;
-        q += 1;
+        hi |= w;
+        q += 8;
     }
-    if hi >= 0x80 && std::str::from_utf8(&b[p..q]).is_err() {
+    if at(b, q) != b'"' {
+        return None;
+    }
+    if hi & HIGH != 0 && std::str::from_utf8(&b[p..q]).is_err() {
         return None;
     }
     Some((p, q))
@@ -168,6 +179,54 @@ fn binder(b: &[u8], p: usize) -> Option<(u32, usize)> {
     } else {
         None
     }
+}
+
+// Application lines {"app":{"arg":A,"fn":F},"ie":I} from p while I is the
+// next id e: (where it stopped, the next id).
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn app_run(
+    b: &[u8],
+    mut p: usize,
+    lim: usize,
+    mut e: u64,
+    ecap: u64,
+    kp: *mut u8,
+    ap: *mut u32,
+    bp: *mut u32,
+) -> (usize, u64) {
+    const APP0: u64 = word(b"{\"app\":{", 0, 8);
+    const APP1: u64 = word(b":{\"arg\":", 0, 8);
+    while p < lim && e < ecap {
+        if ld8(b, p) != APP0 || ld8(b, p + 6) != APP1 {
+            break;
+        }
+        let Some((a, q1)) = num(b, p + 14) else { break };
+        if !lit(b, q1, b",\"fn\":") {
+            break;
+        }
+        let Some((f, q2)) = num(b, q1 + 6) else { break };
+        if !lit(b, q2, b"},\"ie\":") {
+            break;
+        }
+        let Some((ie, q3)) = num(b, q2 + 7) else {
+            break;
+        };
+        if !lit(b, q3, b"}\n") {
+            break;
+        }
+        if ie != e || f >= e || a >= e {
+            break;
+        }
+        unsafe {
+            kp.add(e as usize).write(1);
+            ap.add(e as usize).write(f as u32);
+            bp.add(e as usize).write(a as u32);
+        }
+        e += 1;
+        p = q3 + 2;
+    }
+    (p, e)
 }
 
 // Runs of application, lambda and pi lines in their canonical forms while
@@ -191,7 +250,6 @@ pub fn col_run(pk: &mut Pk, b: &[u8], mut p: usize, lim: usize) -> (usize, u64) 
     pk.cols.names.reserve((lim - p) / 16 + 1);
     let mut np = unsafe { pk.cols.names.as_mut_ptr().add(pk.cols.names.len()) };
     const APP0: u64 = word(b"{\"app\":{", 0, 8);
-    const APP1: u64 = word(b":{\"arg\":", 0, 8);
     const FA0: u64 = word(b"{\"forall", 0, 8);
     const IE: u64 = word(b"{\"ie\":\0\0", 0, 8);
     loop {
@@ -201,28 +259,13 @@ pub fn col_run(pk: &mut Pk, b: &[u8], mut p: usize, lim: usize) -> (usize, u64) 
         let w = ld8(b, p);
         let (k, x, y, i, q);
         if w == APP0 {
-            if ld8(b, p + 6) != APP1 {
+            let (q, ne) = app_run(b, p, lim, e, ecap, kp, ap, bp);
+            if ne == e {
                 break;
             }
-            let Some((a, q1)) = num(b, p + 14) else { break };
-            if !lit(b, q1, b",\"fn\":") {
-                break;
-            }
-            let Some((f, q2)) = num(b, q1 + 6) else { break };
-            if !lit(b, q2, b"},\"ie\":") {
-                break;
-            }
-            let Some((ie, q3)) = num(b, q2 + 7) else {
-                break;
-            };
-            if !lit(b, q3, b"}\n") {
-                break;
-            }
-            k = 1u32;
-            x = f;
-            y = a;
-            i = ie;
-            q = q3 + 2;
+            e = ne;
+            p = q;
+            continue;
         } else if w == FA0 {
             if !lit(b, p + 8, b"E\":{\"binderInfo\":\"") {
                 break;
