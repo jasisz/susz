@@ -60,10 +60,10 @@ expressions) on the M2 Pro below, median of three warm runs:
 
 | | wall | instructions | peak footprint | max RSS |
 | --- | --- | --- | --- | --- |
-| 1 thread | 5.5 s | 38.6 G | 1648 MB | 2043 MB |
-| 1 thread, `--no-index` | 5.5 s | 36.8 G | 1644 MB | 1947 MB |
-| 4 threads | 3.6 s | 39.3 G | 1631 MB | 2158 MB |
-| 4 threads, `--no-index` | 3.4 s | 37.4 G | 1628 MB | 2071 MB |
+| 1 thread | 5.1 s | 34.5 G | 1647 MB | 2043 MB |
+| 1 thread, `--no-index` | 4.9 s | 32.4 G | 1643 MB | 1946 MB |
+| 4 threads | 3.4 s | 35.0 G | 1630 MB | 2157 MB |
+| 4 threads, `--no-index` | 3.3 s | 33.1 G | 1627 MB | 2069 MB |
 
 (MB here are MiB.) The max RSS is higher than the footprint because the
 columns `pack` is done with are handed back to the system as it goes; macOS
