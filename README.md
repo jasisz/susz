@@ -8,7 +8,10 @@ just without the JSON.
 
 Why bother:
 
-- It's about ten times smaller. Mathlib goes from 6 GB of ndjson to 608 MB.
+- It's about ten times smaller than the ndjson, and two to three times
+  smaller when both are compressed. Mathlib: 6.18 GB of ndjson against
+  637 MB of Susz; with `gzip -6`, 975 MB against 367 MB; with `zstd -19`,
+  656 MB against 334 MB.
 - A checker doesn't have to parse text, so reading the environment is cheap.
 - Proofs used by only one theorem sit in their own blocks. A checker can skip
   them until it needs them, or check them in parallel.
