@@ -848,16 +848,37 @@ const HIGH: u64 = 0x8080_8080_8080_8080;
 /// gives `None`, and the record is read again by the checked reader, which
 /// gives the error and its place.
 ///
-/// A varint of at most 8 bytes at `p`, minimal; `b` is the whole file, so
-/// the bytes may run past the section: the caller checks where the record
-/// ends.
+/// A fast-path record is read from a window of the file at its first byte;
+/// its varints start before byte 64 of the window (a record of the fast
+/// path is shorter than that), so a load never needs a bounds check. The
+/// bytes may run past the section: the caller checks where the record ends.
+const WIN: usize = 72;
+
+/// A varint of at most 8 bytes at offset `o` of a window, minimal.
+#[inline(always)]
+fn fw(win: &[u8; WIN], o: &mut usize) -> Option<u64> {
+    // o < 64 always (see WIN); the mask only lets the compiler see it
+    let i = *o & 63;
+    let w = u64::from_le_bytes(win[i..i + 8].try_into().unwrap());
+    word_varint(w, o)
+}
+
+/// A varint of at most 8 bytes at `p` of `b`, minimal.
 #[inline(always)]
 fn fv(b: &[u8], p: &mut usize) -> Option<u64> {
     let w = u64::from_le_bytes(b.get(*p..*p + 8)?.try_into().unwrap());
+    word_varint(w, p)
+}
+
+/// The varint at the start of the little-endian word `w`, if it has at most
+/// 8 bytes and is minimal; `p` moves past it.
+#[inline(always)]
+fn word_varint(w: u64, p: &mut usize) -> Option<u64> {
     if w & 0x80 == 0 {
         *p += 1;
         return Some(w & 0x7f);
     }
+    // two to four bytes: the last one (with its high bit clear) is not zero
     if w & 0x8000 == 0 {
         let hi = (w >> 8) & 0x7f;
         if hi == 0 {
@@ -866,11 +887,27 @@ fn fv(b: &[u8], p: &mut usize) -> Option<u64> {
         *p += 2;
         return Some((w & 0x7f) | hi << 7);
     }
+    if w & 0x80_0000 == 0 {
+        let hi = (w >> 16) & 0x7f;
+        if hi == 0 {
+            return None;
+        }
+        *p += 3;
+        return Some((w & 0x7f) | (w >> 1) & 0x3f80 | hi << 14);
+    }
+    if w & 0x8000_0000 == 0 {
+        let hi = (w >> 24) & 0x7f;
+        if hi == 0 {
+            return None;
+        }
+        *p += 4;
+        return Some((w & 0x7f) | (w >> 1) & 0x3f80 | (w >> 2) & 0x1f_c000 | hi << 21);
+    }
     let stop = !w & HIGH;
     if stop == 0 {
         return None;
     }
-    // bytes in the varint, 3..=8; the last one is not zero
+    // bytes in the varint, 5..=8; the last one is not zero
     let n = stop.trailing_zeros() / 8 + 1;
     if (w >> (8 * (n - 1))) & 0xff == 0 {
         return None;
@@ -907,29 +944,10 @@ impl<'a> Cur<'a> {
     /// the rest (and every error) through the plain decoder.
     #[inline(always)]
     fn v_long(&mut self) -> Result<u64, E> {
-        if let Some(w) = self.b.get(self.p..self.p + 8) {
-            let w = u64::from_le_bytes(w.try_into().unwrap());
-            let stop = !w & HIGH;
-            if stop != 0 {
-                // bytes in the varint, 1..=8; the first has its high bit set
-                let n = stop.trailing_zeros() / 8 + 1;
-                let last = (w >> (8 * (n - 1))) & 0xff;
-                if last != 0 {
-                    let x = if n == 8 {
-                        w
-                    } else {
-                        w & ((1u64 << (8 * n)) - 1)
-                    };
-                    // pack the 7-bit groups: pairs, quads, then all eight
-                    let x = (x & 0x007f_007f_007f_007f) | ((x & 0x7f00_7f00_7f00_7f00) >> 1);
-                    let x = (x & 0x0000_3fff_0000_3fff) | ((x & 0x3fff_0000_3fff_0000) >> 2);
-                    let x = (x & 0x0fff_ffff) | ((x & 0x0fff_ffff_0000_0000) >> 4);
-                    self.p += n as usize;
-                    return Ok(x);
-                }
-            }
+        match fv(self.b, &mut self.p) {
+            Some(x) => Ok(x),
+            None => self.v_slow(),
         }
-        self.v_slow()
     }
     #[cold]
     #[inline(never)]
@@ -2033,25 +2051,25 @@ impl<'a> Main<'a> {
     /// the expression and where the record ends.
     #[inline(always)]
     fn fast_expr(&self, at: usize) -> Option<(Expr<'a>, usize)> {
-        let b = self.bytes;
-        let mut p = at + 1;
-        let e = match *b.get(at)? {
+        let win: &[u8; WIN] = self.bytes.get(at..at + WIN)?.try_into().unwrap();
+        let mut o = 1;
+        let e = match win[0] {
             10 => {
-                let f = self.fback(fv(b, &mut p)?)?;
-                Expr::App(f, self.fback(fv(b, &mut p)?)?)
+                let f = self.fback(fw(win, &mut o)?)?;
+                Expr::App(f, self.fback(fw(win, &mut o)?)?)
             }
             tag @ (11 | 12) => {
-                let bi = *b.get(p)?;
+                let bi = win[1];
                 if bi > 3 {
                     return None;
                 }
-                p += 1;
-                let n = fv(b, &mut p)?;
+                o = 2;
+                let n = fw(win, &mut o)?;
                 if n >= self.st.names as u64 {
                     return None;
                 }
-                let t = self.fback(fv(b, &mut p)?)?;
-                let body = self.fback(fv(b, &mut p)?)?;
+                let t = self.fback(fw(win, &mut o)?)?;
+                let body = self.fback(fw(win, &mut o)?)?;
                 if tag == 11 {
                     Expr::Lam(bi, n as u32, t, body)
                 } else {
@@ -2059,47 +2077,48 @@ impl<'a> Main<'a> {
                 }
             }
             9 => {
-                let n = fv(b, &mut p)?;
+                let n = fw(win, &mut o)?;
                 if n >= self.st.names as u64 {
                     return None;
                 }
-                let k = fv(b, &mut p)?;
-                if k > 64 {
+                // at most 5 levels: the record stays within the window
+                let k = fw(win, &mut o)?;
+                if k > 5 {
                     return None;
                 }
-                let start = p;
+                let start = o;
                 let levels = self.st.levels as u64;
                 for _ in 0..k {
-                    if fv(b, &mut p)? >= levels {
+                    if fw(win, &mut o)? >= levels {
                         return None;
                     }
                 }
-                if p > self.end {
+                if at + o > self.end {
                     return None;
                 }
                 Expr::Const(
                     n as u32,
                     Ids {
-                        raw: &b[start..p],
+                        raw: &self.bytes[at + start..at + o],
                         n: k,
                         map: None,
                     },
                 )
             }
             8 => {
-                let l = fv(b, &mut p)?;
+                let l = fw(win, &mut o)?;
                 if l >= self.st.levels as u64 {
                     return None;
                 }
                 Expr::Sort(l as u32)
             }
-            7 => Expr::BVar(fv(b, &mut p)?),
+            7 => Expr::BVar(fw(win, &mut o)?),
             _ => return None,
         };
-        if p > self.end || self.st.exprs == u32::MAX {
+        if at + o > self.end || self.st.exprs == u32::MAX {
             return None;
         }
-        Some((e, p))
+        Some((e, at + o))
     }
 
     fn run<V: Visit<'a>>(mut self, v: &mut V) -> Result<Decoded, Stop<V::Error>> {
@@ -2181,22 +2200,22 @@ impl<'a> Block<'a> {
     /// expression and where the record ends.
     #[inline(always)]
     fn fast(&self, at: usize, k: u64) -> Option<(Expr<'a>, usize)> {
-        let b = self.bytes;
-        let mut p = at + 1;
-        let e = match *b.get(at)? {
+        let win: &[u8; WIN] = self.bytes.get(at..at + WIN)?.try_into().unwrap();
+        let mut o = 1;
+        let e = match win[0] {
             10 => {
-                let f = self.fref(fv(b, &mut p)?, k)?;
-                Expr::App(f, self.fref(fv(b, &mut p)?, k)?)
+                let f = self.fref(fw(win, &mut o)?, k)?;
+                Expr::App(f, self.fref(fw(win, &mut o)?, k)?)
             }
             tag @ (11 | 12) => {
-                let bi = *b.get(p)?;
+                let bi = win[1];
                 if bi > 3 {
                     return None;
                 }
-                p += 1;
-                let n = *self.fnames.get(usize::try_from(fv(b, &mut p)?).ok()?)?;
-                let t = self.fref(fv(b, &mut p)?, k)?;
-                let body = self.fref(fv(b, &mut p)?, k)?;
+                o = 2;
+                let n = *self.fnames.get(usize::try_from(fw(win, &mut o)?).ok()?)?;
+                let t = self.fref(fw(win, &mut o)?, k)?;
+                let body = self.fref(fw(win, &mut o)?, k)?;
                 if tag == 11 {
                     Expr::Lam(bi, n, t, body)
                 } else {
@@ -2204,18 +2223,18 @@ impl<'a> Block<'a> {
                 }
             }
             13 => {
-                let n = *self.fnames.get(usize::try_from(fv(b, &mut p)?).ok()?)?;
-                let t = self.fref(fv(b, &mut p)?, k)?;
-                let v = self.fref(fv(b, &mut p)?, k)?;
-                Expr::Let(n, t, v, self.fref(fv(b, &mut p)?, k)?)
+                let n = *self.fnames.get(usize::try_from(fw(win, &mut o)?).ok()?)?;
+                let t = self.fref(fw(win, &mut o)?, k)?;
+                let v = self.fref(fw(win, &mut o)?, k)?;
+                Expr::Let(n, t, v, self.fref(fw(win, &mut o)?, k)?)
             }
-            7 => Expr::BVar(fv(b, &mut p)?),
+            7 => Expr::BVar(fw(win, &mut o)?),
             _ => return None,
         };
-        if p > self.end {
+        if at + o > self.end {
             return None;
         }
-        Some((e, p))
+        Some((e, at + o))
     }
 
     fn run<E>(self, f: &mut impl FnMut(u32, &Expr<'a>) -> Result<(), E>) -> Result<(), Stop<E>> {
