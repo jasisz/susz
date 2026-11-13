@@ -534,7 +534,17 @@ impl<'a> Ids<'a> {
         let map = self.map;
         let mut p = 0usize;
         (0..self.n).map(move |_| {
-            let v = format::get_varint(raw, &mut p, raw.len()).unwrap_or(0);
+            // the varints were checked when the list was read
+            let mut v = 0u64;
+            let mut sh = 0;
+            while let Some(&x) = raw.get(p) {
+                p += 1;
+                v |= ((x & 0x7f) as u64) << (sh & 63);
+                if x < 0x80 {
+                    break;
+                }
+                sh += 7;
+            }
             match map {
                 Some(m) => m[v as usize],
                 None => v as u32,
@@ -832,6 +842,88 @@ struct Cur<'a> {
 
 const HIGH: u64 = 0x8080_8080_8080_8080;
 
+/// The fast paths of [`decode`] and [`decode_block`]: a record is read with
+/// plain loads and accepted only if every check passes. Anything else (a
+/// record near the end of the file, a varint longer than 8 bytes, any error)
+/// gives `None`, and the record is read again by the checked reader, which
+/// gives the error and its place.
+///
+/// A fast-path record is read from a window of the file at its first byte;
+/// its varints start before byte 64 of the window (a record of the fast
+/// path is shorter than that), so a load never needs a bounds check. The
+/// bytes may run past the section: the caller checks where the record ends.
+const WIN: usize = 72;
+
+/// A varint of at most 8 bytes at offset `o` of a window, minimal.
+#[inline(always)]
+fn fw(win: &[u8; WIN], o: &mut usize) -> Option<u64> {
+    // o < 64 always (see WIN); the mask only lets the compiler see it
+    let i = *o & 63;
+    let w = u64::from_le_bytes(win[i..i + 8].try_into().unwrap());
+    word_varint(w, o)
+}
+
+/// A varint of at most 8 bytes at `p` of `b`, minimal.
+#[inline(always)]
+fn fv(b: &[u8], p: &mut usize) -> Option<u64> {
+    let w = u64::from_le_bytes(b.get(*p..*p + 8)?.try_into().unwrap());
+    word_varint(w, p)
+}
+
+/// The varint at the start of the little-endian word `w`, if it has at most
+/// 8 bytes and is minimal; `p` moves past it.
+#[inline(always)]
+fn word_varint(w: u64, p: &mut usize) -> Option<u64> {
+    if w & 0x80 == 0 {
+        *p += 1;
+        return Some(w & 0x7f);
+    }
+    // two to four bytes: the last one (with its high bit clear) is not zero
+    if w & 0x8000 == 0 {
+        let hi = (w >> 8) & 0x7f;
+        if hi == 0 {
+            return None;
+        }
+        *p += 2;
+        return Some((w & 0x7f) | hi << 7);
+    }
+    if w & 0x80_0000 == 0 {
+        let hi = (w >> 16) & 0x7f;
+        if hi == 0 {
+            return None;
+        }
+        *p += 3;
+        return Some((w & 0x7f) | (w >> 1) & 0x3f80 | hi << 14);
+    }
+    if w & 0x8000_0000 == 0 {
+        let hi = (w >> 24) & 0x7f;
+        if hi == 0 {
+            return None;
+        }
+        *p += 4;
+        return Some((w & 0x7f) | (w >> 1) & 0x3f80 | (w >> 2) & 0x1f_c000 | hi << 21);
+    }
+    let stop = !w & HIGH;
+    if stop == 0 {
+        return None;
+    }
+    // bytes in the varint, 5..=8; the last one is not zero
+    let n = stop.trailing_zeros() / 8 + 1;
+    if (w >> (8 * (n - 1))) & 0xff == 0 {
+        return None;
+    }
+    let x = if n == 8 {
+        w
+    } else {
+        w & ((1u64 << (8 * n)) - 1)
+    };
+    let x = (x & 0x007f_007f_007f_007f) | ((x & 0x7f00_7f00_7f00_7f00) >> 1);
+    let x = (x & 0x0000_3fff_0000_3fff) | ((x & 0x3fff_0000_3fff_0000) >> 2);
+    let x = (x & 0x0fff_ffff) | ((x & 0x0fff_ffff_0000_0000) >> 4);
+    *p += n as usize;
+    Some(x)
+}
+
 impl<'a> Cur<'a> {
     #[inline(always)]
     fn left(&self) -> usize {
@@ -852,29 +944,10 @@ impl<'a> Cur<'a> {
     /// the rest (and every error) through the plain decoder.
     #[inline(always)]
     fn v_long(&mut self) -> Result<u64, E> {
-        if let Some(w) = self.b.get(self.p..self.p + 8) {
-            let w = u64::from_le_bytes(w.try_into().unwrap());
-            let stop = !w & HIGH;
-            if stop != 0 {
-                // bytes in the varint, 1..=8; the first has its high bit set
-                let n = stop.trailing_zeros() / 8 + 1;
-                let last = (w >> (8 * (n - 1))) & 0xff;
-                if last != 0 {
-                    let x = if n == 8 {
-                        w
-                    } else {
-                        w & ((1u64 << (8 * n)) - 1)
-                    };
-                    // pack the 7-bit groups: pairs, quads, then all eight
-                    let x = (x & 0x007f_007f_007f_007f) | ((x & 0x7f00_7f00_7f00_7f00) >> 1);
-                    let x = (x & 0x0000_3fff_0000_3fff) | ((x & 0x3fff_0000_3fff_0000) >> 2);
-                    let x = (x & 0x0fff_ffff) | ((x & 0x0fff_ffff_0000_0000) >> 4);
-                    self.p += n as usize;
-                    return Ok(x);
-                }
-            }
+        match fv(self.b, &mut self.p) {
+            Some(x) => Ok(x),
+            None => self.v_slow(),
         }
-        self.v_slow()
     }
     #[cold]
     #[inline(never)]
@@ -1002,7 +1075,8 @@ impl<'a> Main<'a> {
     }
     #[inline(always)]
     fn back(&self, d: u64) -> Result<u32, E> {
-        if d == 0 || d > self.st.exprs as u64 {
+        // d - 1 < exprs, with d = 0 wrapping to the top
+        if d.wrapping_sub(1) >= self.st.exprs as u64 {
             return Err((
                 Class::BackDistance,
                 format!(
@@ -1096,101 +1170,158 @@ impl<'a> Main<'a> {
         })
     }
 
+    /// A name record after its tag (1 or 2): its id, prefix and component.
     #[inline(always)]
+    fn name_rec(&mut self, tag: u8, c: &mut Cur<'a>) -> Result<(u32, u32, Component<'a>), E> {
+        let pre = self.name_id(c.v()?)?;
+        let (part, off) = if tag == 1 {
+            let s = c.string()?;
+            (Component::Str(s), (c.p - s.len()) as u64)
+        } else {
+            (Component::Num(c.v()?), 0)
+        };
+        let id = self.new_name(pre, part, off)?;
+        Ok((id, pre, part))
+    }
+
+    /// A level record after its tag (3 to 6).
+    #[inline(always)]
+    fn level_rec(&mut self, tag: u8, c: &mut Cur<'a>) -> Result<(u32, Level), E> {
+        let level = match tag {
+            3 => Level::Succ(self.level_id(c.v()?)?),
+            4 => Level::Max(self.level_id(c.v()?)?, self.level_id(c.v()?)?),
+            5 => Level::IMax(self.level_id(c.v()?)?, self.level_id(c.v()?)?),
+            _ => Level::Param(self.name_id(c.v()?)?),
+        };
+        if self.st.levels == u32::MAX {
+            return Err((Class::Counts, "more than 2^32 - 1 levels".into()));
+        }
+        let id = self.st.levels;
+        self.st.levels += 1;
+        Ok((id, level))
+    }
+
+    /// An expression record after its tag (7 to 16).
+    #[inline(always)]
+    fn expr_rec(&mut self, tag: u8, c: &mut Cur<'a>) -> Result<(u32, Expr<'a>), E> {
+        let expr = match tag {
+            10 => Expr::App(Ref::Main(self.back(c.v()?)?), Ref::Main(self.back(c.v()?)?)),
+            7 => Expr::BVar(c.v()?),
+            8 => Expr::Sort(self.level_id(c.v()?)?),
+            9 => {
+                let n = self.name_id(c.v()?)?;
+                let levels = self.st.levels as u64;
+                let us = c.ids(|x| {
+                    if x < levels {
+                        Ok(())
+                    } else {
+                        Err((Class::LevelId, format!("level {x} is not defined yet")))
+                    }
+                })?;
+                Expr::Const(n, us)
+            }
+            11 | 12 => {
+                let bi = c.enm(3, "binder")?;
+                let n = self.name_id(c.v()?)?;
+                let t = Ref::Main(self.back(c.v()?)?);
+                let b = Ref::Main(self.back(c.v()?)?);
+                if tag == 11 {
+                    Expr::Lam(bi, n, t, b)
+                } else {
+                    Expr::Pi(bi, n, t, b)
+                }
+            }
+            13 => {
+                let n = self.name_id(c.v()?)?;
+                let t = Ref::Main(self.back(c.v()?)?);
+                let v = Ref::Main(self.back(c.v()?)?);
+                let b = Ref::Main(self.back(c.v()?)?);
+                Expr::Let(n, t, v, b)
+            }
+            14 => Expr::Nat(c.nat()?),
+            15 => Expr::Str(c.string()?),
+            _ => {
+                let n = self.name_id(c.v()?)?;
+                let i = c.v()?;
+                Expr::Proj(n, i, Ref::Main(self.back(c.v()?)?))
+            }
+        };
+        if self.st.exprs == u32::MAX {
+            return Err((Class::Counts, "more than 2^32 - 1 expressions".into()));
+        }
+        let id = self.st.exprs;
+        self.st.exprs += 1;
+        Ok((id, expr))
+    }
+
+    /// A frontier record after its tag (19): kind, entry index, item.
+    fn frontier_rec(&mut self, c: &mut Cur<'a>) -> Result<(u8, u32, u32), E> {
+        let kind = c.enm(2, "frontier kind")?;
+        let d = c.v()?;
+        let next = self.st.next(kind) as u64;
+        if d == 0 || d > next {
+            return Err((
+                Class::FrontierBack,
+                format!("frontier back distance {d} with {next} items defined"),
+            ));
+        }
+        let item = (next - d) as u32;
+        let bits = &mut self.st.listed[kind as usize];
+        let (w, b) = ((item / 64) as usize, item % 64);
+        if bits.len() <= w {
+            bits.resize(w + 1, 0);
+        }
+        if bits[w] >> b & 1 != 0 {
+            return Err((
+                Class::FrontierDuplicate,
+                format!("item {item} is already in the frontier"),
+            ));
+        }
+        bits[w] |= 1 << b;
+        let t = &mut self.st.frontier[kind as usize];
+        let index = t.len() as u32;
+        t.push(item);
+        Ok((kind, index, item))
+    }
+
+    /// A declaration record after its tag (18): its index and declaration.
+    fn decl_rec(&mut self, c: &mut Cur<'a>) -> Result<(u32, Decl<'a>), E> {
+        let index = self.st.decls;
+        if index == u32::MAX {
+            return Err((Class::Counts, "more than 2^32 - 1 declarations".into()));
+        }
+        let decl = self.decl(c)?;
+        self.st.decls += 1;
+        Ok((index, decl))
+    }
+
+    #[cold]
+    fn bad_tag(t: u8) -> E {
+        if t == 17 {
+            (Class::Tag, "tag 17 is reserved".into())
+        } else {
+            (Class::Tag, format!("unknown tag {t}"))
+        }
+    }
+
     fn record(&mut self, c: &mut Cur<'a>) -> Result<Event<'a>, E> {
         let at = c.p as u64;
         let tag = c.byte()?;
         match tag {
             1 | 2 => {
-                let pre = self.name_id(c.v()?)?;
-                let part = if tag == 1 {
-                    Component::Str(c.string()?)
-                } else {
-                    Component::Num(c.v()?)
-                };
-                let off = if let Component::Str(s) = part {
-                    (c.p - s.len()) as u64
-                } else {
-                    0
-                };
-                let id = self.new_name(pre, part, off)?;
-                Ok(Event::Name {
-                    id,
-                    prefix: pre,
-                    part,
-                })
+                let (id, prefix, part) = self.name_rec(tag, c)?;
+                Ok(Event::Name { id, prefix, part })
             }
             3..=6 => {
-                let level = match tag {
-                    3 => Level::Succ(self.level_id(c.v()?)?),
-                    4 => Level::Max(self.level_id(c.v()?)?, self.level_id(c.v()?)?),
-                    5 => Level::IMax(self.level_id(c.v()?)?, self.level_id(c.v()?)?),
-                    _ => Level::Param(self.name_id(c.v()?)?),
-                };
-                if self.st.levels == u32::MAX {
-                    return Err((Class::Counts, "more than 2^32 - 1 levels".into()));
-                }
-                let id = self.st.levels;
-                self.st.levels += 1;
+                let (id, level) = self.level_rec(tag, c)?;
                 Ok(Event::Level { id, level })
             }
             7..=16 => {
-                let expr = match tag {
-                    7 => Expr::BVar(c.v()?),
-                    8 => Expr::Sort(self.level_id(c.v()?)?),
-                    9 => {
-                        let n = self.name_id(c.v()?)?;
-                        let levels = self.st.levels as u64;
-                        let us = c.ids(|x| {
-                            if x < levels {
-                                Ok(())
-                            } else {
-                                Err((Class::LevelId, format!("level {x} is not defined yet")))
-                            }
-                        })?;
-                        Expr::Const(n, us)
-                    }
-                    10 => Expr::App(Ref::Main(self.back(c.v()?)?), Ref::Main(self.back(c.v()?)?)),
-                    11 | 12 => {
-                        let bi = c.enm(3, "binder")?;
-                        let n = self.name_id(c.v()?)?;
-                        let t = Ref::Main(self.back(c.v()?)?);
-                        let b = Ref::Main(self.back(c.v()?)?);
-                        if tag == 11 {
-                            Expr::Lam(bi, n, t, b)
-                        } else {
-                            Expr::Pi(bi, n, t, b)
-                        }
-                    }
-                    13 => {
-                        let n = self.name_id(c.v()?)?;
-                        let t = Ref::Main(self.back(c.v()?)?);
-                        let v = Ref::Main(self.back(c.v()?)?);
-                        let b = Ref::Main(self.back(c.v()?)?);
-                        Expr::Let(n, t, v, b)
-                    }
-                    14 => Expr::Nat(c.nat()?),
-                    15 => Expr::Str(c.string()?),
-                    _ => {
-                        let n = self.name_id(c.v()?)?;
-                        let i = c.v()?;
-                        Expr::Proj(n, i, Ref::Main(self.back(c.v()?)?))
-                    }
-                };
-                if self.st.exprs == u32::MAX {
-                    return Err((Class::Counts, "more than 2^32 - 1 expressions".into()));
-                }
-                let id = self.st.exprs;
-                self.st.exprs += 1;
+                let (id, expr) = self.expr_rec(tag, c)?;
                 Ok(Event::Expr { id, expr })
             }
             18 => {
-                let index = self.st.decls;
-                if index == u32::MAX {
-                    return Err((Class::Counts, "more than 2^32 - 1 declarations".into()));
-                }
-                let decl = self.decl(c)?;
-                self.st.decls += 1;
+                let (index, decl) = self.decl_rec(c)?;
                 Ok(Event::Decl {
                     index,
                     offset: at,
@@ -1198,35 +1329,10 @@ impl<'a> Main<'a> {
                 })
             }
             19 => {
-                let kind = c.enm(2, "frontier kind")?;
-                let d = c.v()?;
-                let next = self.st.next(kind) as u64;
-                if d == 0 || d > next {
-                    return Err((
-                        Class::FrontierBack,
-                        format!("frontier back distance {d} with {next} items defined"),
-                    ));
-                }
-                let item = (next - d) as u32;
-                let bits = &mut self.st.listed[kind as usize];
-                let (w, b) = ((item / 64) as usize, item % 64);
-                if bits.len() <= w {
-                    bits.resize(w + 1, 0);
-                }
-                if bits[w] >> b & 1 != 0 {
-                    return Err((
-                        Class::FrontierDuplicate,
-                        format!("item {item} is already in the frontier"),
-                    ));
-                }
-                bits[w] |= 1 << b;
-                let t = &mut self.st.frontier[kind as usize];
-                let index = t.len() as u32;
-                t.push(item);
+                let (kind, index, item) = self.frontier_rec(c)?;
                 Ok(Event::Frontier { kind, index, item })
             }
-            17 => Err((Class::Tag, "tag 17 is reserved".into())),
-            t => Err((Class::Tag, format!("unknown tag {t}"))),
+            t => Err(Self::bad_tag(t)),
         }
     }
 
@@ -1504,11 +1610,22 @@ pub struct Block<'a> {
     k: u64,
     done: bool,
     rule_p: bool,
+    /// The frontier entries the block may use, per kind.
+    fnames: &'a [u32],
+    flevels: &'a [u32],
+    fexprs: &'a [u32],
 }
 
 impl<'a> Block<'a> {
     pub fn new(bytes: &'a [u8], st: &'a State, b: BlockRef) -> Block<'a> {
+        let f = |k: usize| {
+            let t = &st.frontier[k][..];
+            &t[..(b.frontier[k] as usize).min(t.len())]
+        };
         Block {
+            fnames: f(0),
+            flevels: f(1),
+            fexprs: f(2),
             bytes,
             st,
             b,
@@ -1537,41 +1654,45 @@ impl<'a> Block<'a> {
 
     #[inline(always)]
     fn fname(&self, x: u64) -> Result<u32, E> {
-        if x >= self.b.frontier[0] as u64 {
-            return Err((
-                Class::FrontierIndex,
-                format!("frontier name {x} not listed before the declaration"),
-            ));
+        match usize::try_from(x).ok().and_then(|i| self.fnames.get(i)) {
+            Some(&n) => Ok(n),
+            None => Err(Self::unlisted("name", x)),
         }
-        Ok(self.st.frontier[0][x as usize])
+    }
+    #[cold]
+    fn unlisted(what: &str, x: u64) -> E {
+        (
+            Class::FrontierIndex,
+            format!("frontier {what} {x} not listed before the declaration"),
+        )
     }
     #[inline(always)]
     fn flevel(&self, x: u64) -> Result<u32, E> {
-        if x >= self.b.frontier[1] as u64 {
-            return Err((
-                Class::FrontierIndex,
-                format!("frontier level {x} not listed before the declaration"),
-            ));
+        match usize::try_from(x).ok().and_then(|i| self.flevels.get(i)) {
+            Some(&n) => Ok(n),
+            None => Err(Self::unlisted("level", x)),
         }
-        Ok(self.st.frontier[1][x as usize])
     }
     #[inline(always)]
     fn eref(&self, r: u64, k: u64) -> Result<Ref, E> {
-        if r == 0 {
-            return Err((Class::BackDistance, "reference 0".into()));
-        }
-        if r <= k {
+        // r - 1 < k: an expression of this block (r = 0 wraps to the top)
+        let d = r.wrapping_sub(1);
+        if d < k {
             // k < block-exprs <= MAX_BLOCK_EXPRS, checked in the record
             return Ok(Ref::Block((k - r) as u32));
         }
-        let f = r - k - 1;
-        if f >= self.b.frontier[2] as u64 {
-            return Err((
-                Class::FrontierIndex,
-                format!("frontier expression {f} not listed before the declaration"),
-            ));
+        self.eref_frontier(r, k)
+    }
+    #[inline(always)]
+    fn eref_frontier(&self, r: u64, k: u64) -> Result<Ref, E> {
+        if r == 0 {
+            return Err((Class::BackDistance, "reference 0".into()));
         }
-        Ok(Ref::Main(self.st.frontier[2][f as usize]))
+        let f = r - k - 1;
+        match usize::try_from(f).ok().and_then(|i| self.fexprs.get(i)) {
+            Some(&e) => Ok(Ref::Main(e)),
+            None => Err(Self::unlisted("expression", f)),
+        }
     }
     // rule P (spec 6)
     fn placed(&self, name: u32) -> Result<(), E> {
@@ -1603,18 +1724,15 @@ impl<'a> Block<'a> {
             9 => {
                 let n = self.fname(c.v()?)?;
                 self.placed(n)?;
-                let lim = self.b.frontier[1] as u64;
+                let lim = self.flevels.len() as u64;
                 let mut us = c.ids(|x| {
                     if x < lim {
                         Ok(())
                     } else {
-                        Err((
-                            Class::FrontierIndex,
-                            format!("frontier level {x} not listed before the declaration"),
-                        ))
+                        Err(Self::unlisted("level", x))
                     }
                 })?;
-                us.map = Some(&self.st.frontier[1]);
+                us.map = Some(self.flevels);
                 Expr::Const(n, us)
             }
             10 => {
@@ -1840,11 +1958,266 @@ pub fn decode_block<'a, E>(
 }
 
 impl<'a> Main<'a> {
-    fn run<V: Visit<'a>>(mut self, v: &mut V) -> Result<Decoded, Stop<V::Error>> {
-        let mut c = Cur {
+    /// One record of [`decode`]: checked, then handed to the visitor when
+    /// `live` (no block failed yet). The outer error is the record's own; the
+    /// inner one a block's failure or the visitor's.
+    #[inline(always)]
+    fn step<V: Visit<'a>>(
+        &mut self,
+        p: &mut usize,
+        at: usize,
+        v: &mut V,
+        live: bool,
+        sum: &mut Summary,
+        unread: &mut u64,
+    ) -> Result<Result<(), Stop<V::Error>>, E> {
+        let mut cur = Cur {
             b: &self.bytes[..self.end],
-            p: self.p,
+            p: at,
         };
+        let c = &mut cur;
+        let r = self.step_at(c, at, v, live, sum, unread);
+        *p = cur.p;
+        r
+    }
+
+    #[inline(always)]
+    fn step_at<V: Visit<'a>>(
+        &mut self,
+        c: &mut Cur<'a>,
+        at: usize,
+        v: &mut V,
+        live: bool,
+        sum: &mut Summary,
+        unread: &mut u64,
+    ) -> Result<Result<(), Stop<V::Error>>, E> {
+        let tag = c.byte()?;
+        let r = match tag {
+            7..=16 => {
+                let (id, expr) = self.expr_rec(tag, c)?;
+                if !live {
+                    return Ok(Ok(()));
+                }
+                v.expr(id, &expr)
+            }
+            1 | 2 => {
+                let (id, prefix, part) = self.name_rec(tag, c)?;
+                if !live {
+                    return Ok(Ok(()));
+                }
+                v.name(id, prefix, part)
+            }
+            3..=6 => {
+                let (id, level) = self.level_rec(tag, c)?;
+                if !live {
+                    return Ok(Ok(()));
+                }
+                v.level(id, level)
+            }
+            19 => {
+                let (kind, index, item) = self.frontier_rec(c)?;
+                if !live {
+                    return Ok(Ok(()));
+                }
+                v.frontier(kind, index, item)
+            }
+            18 => {
+                let (index, decl) = self.decl_rec(c)?;
+                if !live {
+                    return Ok(Ok(()));
+                }
+                return Ok(self.visit_decl(v, index, at as u64, &decl, sum, unread));
+            }
+            t => return Err(Self::bad_tag(t)),
+        };
+        Ok(r.map_err(Stop::Visitor))
+    }
+
+    #[inline(never)]
+    fn visit_decl<V: Visit<'a>>(
+        &self,
+        v: &mut V,
+        index: u32,
+        offset: u64,
+        decl: &Decl<'a>,
+        sum: &mut Summary,
+        unread: &mut u64,
+    ) -> Result<(), Stop<V::Error>> {
+        if let Decl::ThmBlock { block, .. } = decl {
+            sum.blocks += 1;
+            sum.block_exprs += block.exprs;
+            if v.open_block(block) {
+                Block::new(self.bytes, &self.st, *block)
+                    .run(&mut |k, e: &Expr<'_>| v.block_expr(k, e))?;
+            } else {
+                *unread += 1;
+            }
+        }
+        v.decl(index, offset, decl).map_err(Stop::Visitor)
+    }
+
+    /// A MAIN expression id from a back distance, for the fast path.
+    #[inline(always)]
+    fn fback(n: u32, d: u64) -> Option<Ref> {
+        let n = n as u64;
+        if d.wrapping_sub(1) < n {
+            Some(Ref::Main((n - d) as u32))
+        } else {
+            None
+        }
+    }
+
+    /// The fast path of one MAIN expression record at `at` (see [`fv`]):
+    /// the expression and where the record ends.
+    #[inline(always)]
+    fn fast_expr(&self, at: usize, [names, levels, exprs]: [u32; 3]) -> Option<(Expr<'a>, usize)> {
+        let win: &[u8; WIN] = self.bytes.get(at..at + WIN)?.try_into().unwrap();
+        let mut o = 1;
+        let e = match win[0] {
+            10 => {
+                let f = Self::fback(exprs, fw(win, &mut o)?)?;
+                Expr::App(f, Self::fback(exprs, fw(win, &mut o)?)?)
+            }
+            tag @ (11 | 12) => {
+                let bi = win[1];
+                if bi > 3 {
+                    return None;
+                }
+                o = 2;
+                let n = fw(win, &mut o)?;
+                if n >= names as u64 {
+                    return None;
+                }
+                let t = Self::fback(exprs, fw(win, &mut o)?)?;
+                let body = Self::fback(exprs, fw(win, &mut o)?)?;
+                if tag == 11 {
+                    Expr::Lam(bi, n as u32, t, body)
+                } else {
+                    Expr::Pi(bi, n as u32, t, body)
+                }
+            }
+            9 => {
+                let n = fw(win, &mut o)?;
+                if n >= names as u64 {
+                    return None;
+                }
+                // at most 5 levels: the record stays within the window
+                let k = fw(win, &mut o)?;
+                if k > 5 {
+                    return None;
+                }
+                let start = o;
+                let levels = levels as u64;
+                for _ in 0..k {
+                    if fw(win, &mut o)? >= levels {
+                        return None;
+                    }
+                }
+                if at + o > self.end {
+                    return None;
+                }
+                Expr::Const(
+                    n as u32,
+                    Ids {
+                        raw: &self.bytes[at + start..at + o],
+                        n: k,
+                        map: None,
+                    },
+                )
+            }
+            8 => {
+                let l = fw(win, &mut o)?;
+                if l >= levels as u64 {
+                    return None;
+                }
+                Expr::Sort(l as u32)
+            }
+            7 => Expr::BVar(fw(win, &mut o)?),
+            _ => return None,
+        };
+        if at + o > self.end || exprs == u32::MAX {
+            return None;
+        }
+        Some((e, at + o))
+    }
+
+    /// The fast path of a frontier record at `at` (see [`fv`]): kind,
+    /// entry index, item and where the record ends. The entry is added
+    /// only when every check passes.
+    #[inline(always)]
+    fn fast_frontier(&mut self, at: usize, exprs: u32) -> Option<(u8, u32, u32, usize)> {
+        let win: &[u8; WIN] = self.bytes.get(at..at + WIN)?.try_into().unwrap();
+        if win[0] != 19 {
+            return None;
+        }
+        let kind = win[1];
+        if kind > 2 {
+            return None;
+        }
+        let mut o = 2;
+        let d = fw(win, &mut o)?;
+        if at + o > self.end {
+            return None;
+        }
+        let next = match kind {
+            0 => self.st.names,
+            1 => self.st.levels,
+            _ => exprs,
+        } as u64;
+        if d.wrapping_sub(1) >= next {
+            return None;
+        }
+        let item = (next - d) as u32;
+        let bits = &mut self.st.listed[kind as usize];
+        let (w, b) = ((item / 64) as usize, item % 64);
+        if bits.len() <= w {
+            bits.resize(w + 1, 0);
+        }
+        if bits[w] >> b & 1 != 0 {
+            return None;
+        }
+        bits[w] |= 1 << b;
+        let t = &mut self.st.frontier[kind as usize];
+        let index = t.len() as u32;
+        t.push(item);
+        Some((kind, index, item, at + o))
+    }
+
+    /// The fast path of a name record at `at` (see [`fv`]): prefix,
+    /// component, the component's offset (for a string) and where the
+    /// record ends.
+    #[inline(always)]
+    fn fast_name(&self, at: usize, names: u32) -> Option<(u32, Component<'a>, usize, usize)> {
+        let win: &[u8; WIN] = self.bytes.get(at..at + WIN)?.try_into().unwrap();
+        let tag = win[0];
+        if !(1..=2).contains(&tag) || names == u32::MAX {
+            return None;
+        }
+        let mut o = 1;
+        let pre = fw(win, &mut o)?;
+        if pre >= names as u64 {
+            return None;
+        }
+        let part = fw(win, &mut o)?;
+        if tag == 2 {
+            if at + o > self.end {
+                return None;
+            }
+            return Some((pre as u32, Component::Num(part), 0, at + o));
+        }
+        // a string of `part` bytes, in the section
+        let len = usize::try_from(part).ok()?;
+        let s = self.bytes.get(at + o..)?.get(..len)?;
+        let end = at + o + len;
+        if end > self.end {
+            return None;
+        }
+        let s = std::str::from_utf8(s).ok()?;
+        Some((pre as u32, Component::Str(s), at + o, end))
+    }
+
+    fn run<V: Visit<'a>>(mut self, v: &mut V) -> Result<Decoded, Stop<V::Error>> {
+        let mut p = self.p;
         let mut sum = Summary {
             counts: self.counts,
             ..Default::default()
@@ -1852,57 +2225,73 @@ impl<'a> Main<'a> {
         let mut unread = 0;
         // the first error inside a block, reported after MAIN is checked
         let mut late: Option<Failure> = None;
-        while c.p < c.b.len() {
-            let at = c.p;
-            self.rec += 1;
-            let ev = match self.record(&mut c) {
-                Ok(ev) => ev,
+        // kept here, not in the state, while records take the fast path
+        let mut rec = self.rec;
+        let mut exprs = self.st.exprs;
+        let (mut names, mut levels) = (self.st.names, self.st.levels);
+        while p < self.end {
+            let at = p;
+            rec += 1;
+            if let Some((e, q)) = self.fast_expr(at, [names, levels, exprs]) {
+                let id = exprs;
+                exprs += 1;
+                p = q;
+                if late.is_none() {
+                    v.expr(id, &e).map_err(Stop::Visitor)?;
+                }
+                continue;
+            }
+            if let Some((kind, index, item, q)) = self.fast_frontier(at, exprs) {
+                p = q;
+                if late.is_none() {
+                    v.frontier(kind, index, item).map_err(Stop::Visitor)?;
+                }
+                continue;
+            }
+            if let Some((pre, part, off, q)) = self.fast_name(at, names) {
+                let r = self.new_name(pre, part, off as u64);
+                names = self.st.names;
+                match r {
+                    Ok(id) => {
+                        p = q;
+                        if late.is_none() {
+                            v.name(id, pre, part).map_err(Stop::Visitor)?;
+                        }
+                        continue;
+                    }
+                    Err((class, msg)) => {
+                        return Err(Stop::File(Failure::new(
+                            class,
+                            Place::Section(format::SEC_MAIN),
+                            at as u64,
+                            rec,
+                            msg,
+                        )))
+                    }
+                }
+            }
+            self.st.exprs = exprs;
+            let r = self.step(&mut p, at, v, late.is_none(), &mut sum, &mut unread);
+            exprs = self.st.exprs;
+            (names, levels) = (self.st.names, self.st.levels);
+            match r {
+                Ok(Ok(())) => {}
+                Ok(Err(Stop::File(f))) => late = Some(f),
+                Ok(Err(Stop::Visitor(e))) => return Err(Stop::Visitor(e)),
                 Err((class, msg)) => {
                     return Err(Stop::File(Failure::new(
                         class,
                         Place::Section(format::SEC_MAIN),
                         at as u64,
-                        self.rec,
+                        rec,
                         msg,
                     )))
                 }
-            };
-            if late.is_some() {
-                continue;
             }
-            let r = match ev {
-                Event::Name { id, prefix, part } => v.name(id, prefix, part),
-                Event::Level { id, level } => v.level(id, level),
-                Event::Expr { id, expr } => v.expr(id, &expr),
-                Event::Frontier { kind, index, item } => v.frontier(kind, index, item),
-                Event::Decl {
-                    index,
-                    offset,
-                    decl,
-                } => {
-                    if let Decl::ThmBlock { block, .. } = &decl {
-                        sum.blocks += 1;
-                        sum.block_exprs += block.exprs;
-                        if v.open_block(block) {
-                            let b = Block::new(self.bytes, &self.st, *block);
-                            match b.run(&mut |k, e: &Expr<'_>| v.block_expr(k, e)) {
-                                Ok(()) => {}
-                                Err(Stop::File(f)) => {
-                                    late = Some(f);
-                                    continue;
-                                }
-                                Err(Stop::Visitor(e)) => return Err(Stop::Visitor(e)),
-                            }
-                        } else {
-                            unread += 1;
-                        }
-                    }
-                    v.decl(index, offset, &decl)
-                }
-            };
-            r.map_err(Stop::Visitor)?;
         }
-        self.p = c.p;
+        self.rec = rec;
+        self.st.exprs = exprs;
+        self.p = p;
         self.finish().map_err(Stop::File)?;
         if let Some(f) = late {
             return Err(Stop::File(f));
@@ -1923,35 +2312,101 @@ impl<'a> Main<'a> {
 impl<'a> Block<'a> {
     /// The whole block through `f`, with the same checks and failures as
     /// the iterator.
-    fn run<E>(self, f: &mut impl FnMut(u32, &Expr<'a>) -> Result<(), E>) -> Result<(), Stop<E>> {
+    /// An expression reference, for the fast path.
+    #[inline(always)]
+    fn fref(&self, r: u64, k: u64) -> Option<Ref> {
+        let d = r.wrapping_sub(1);
+        if d < k {
+            return Some(Ref::Block((k - r) as u32));
+        }
+        // a frontier entry r - k - 1 = d - k; r = 0 gives d = 2^64 - 1, far
+        // past any frontier table
+        let f = usize::try_from(d - k).ok()?;
+        self.fexprs.get(f).map(|&e| Ref::Main(e))
+    }
+
+    /// The fast path of the `k`-th record at `at` (see [`fv`]): the
+    /// expression and where the record ends.
+    #[inline(always)]
+    fn fast(&self, at: usize, k: u64) -> Option<(Expr<'a>, usize)> {
+        let win: &[u8; WIN] = self.bytes.get(at..at + WIN)?.try_into().unwrap();
+        let mut o = 1;
+        let e = match win[0] {
+            10 => {
+                let f = self.fref(fw(win, &mut o)?, k)?;
+                Expr::App(f, self.fref(fw(win, &mut o)?, k)?)
+            }
+            tag @ (11 | 12) => {
+                let bi = win[1];
+                if bi > 3 {
+                    return None;
+                }
+                o = 2;
+                let n = *self.fnames.get(usize::try_from(fw(win, &mut o)?).ok()?)?;
+                let t = self.fref(fw(win, &mut o)?, k)?;
+                let body = self.fref(fw(win, &mut o)?, k)?;
+                if tag == 11 {
+                    Expr::Lam(bi, n, t, body)
+                } else {
+                    Expr::Pi(bi, n, t, body)
+                }
+            }
+            13 => {
+                let n = *self.fnames.get(usize::try_from(fw(win, &mut o)?).ok()?)?;
+                let t = self.fref(fw(win, &mut o)?, k)?;
+                let v = self.fref(fw(win, &mut o)?, k)?;
+                Expr::Let(n, t, v, self.fref(fw(win, &mut o)?, k)?)
+            }
+            7 => Expr::BVar(fw(win, &mut o)?),
+            _ => return None,
+        };
+        if at + o > self.end {
+            return None;
+        }
+        Some((e, at + o))
+    }
+
+    /// The `k`-th record at `at` through the checked reader: the
+    /// expression and where it ends, or the failure.
+    #[inline(never)]
+    fn slow(&self, at: usize, k: u64) -> Result<(Expr<'a>, usize), Failure> {
+        if at >= self.end {
+            return Err(self.fail(
+                Class::BlockCount,
+                at as u64,
+                k + 1,
+                format!("the block ends after {k} of {} expressions", self.b.exprs),
+            ));
+        }
         let mut c = Cur {
             b: &self.bytes[..self.end],
-            p: self.p,
+            p: at,
         };
+        match self.record_at(&mut c, k) {
+            Ok(e) => Ok((e, c.p)),
+            Err((class, msg)) => Err(self.fail(class, at as u64, k + 1, msg)),
+        }
+    }
+
+    fn run<E>(self, f: &mut impl FnMut(u32, &Expr<'a>) -> Result<(), E>) -> Result<(), Stop<E>> {
+        let mut p = self.p;
         let mut k = 0u64;
         while k < self.b.exprs {
-            let at = c.p;
-            if at >= self.end {
-                return Err(Stop::File(self.fail(
-                    Class::BlockCount,
-                    at as u64,
-                    k + 1,
-                    format!("the block ends after {k} of {} expressions", self.b.exprs),
-                )));
-            }
-            match self.record_at(&mut c, k) {
-                // k < block-exprs <= MAX_BLOCK_EXPRS, checked in the record
-                Ok(e) => f(k as u32, &e).map_err(Stop::Visitor)?,
-                Err((class, msg)) => {
-                    return Err(Stop::File(self.fail(class, at as u64, k + 1, msg)))
-                }
+            // k < block-exprs <= MAX_BLOCK_EXPRS, checked in the record
+            if let Some((e, q)) = self.fast(p, k) {
+                f(k as u32, &e).map_err(Stop::Visitor)?;
+                p = q;
+            } else {
+                let (e, q) = self.slow(p, k).map_err(Stop::File)?;
+                f(k as u32, &e).map_err(Stop::Visitor)?;
+                p = q;
             }
             k += 1;
         }
-        if c.p != self.end {
+        if p != self.end {
             return Err(Stop::File(self.fail(
                 Class::BlockCount,
-                c.p as u64,
+                p as u64,
                 k + 1,
                 format!("bytes left after {} expressions", self.b.exprs),
             )));
@@ -2041,6 +2496,53 @@ mod tests {
     // block-exprs is limited to 2^32 - 1 (spec 7.1), decided from the
     // record before any block is read: 2^32 is a block-exprs error, 2^32 - 1
     // passes that check and fails only because the block is not there.
+    // The fast paths' varint reader against the plain one: every word whose
+    // first two bytes take any value, words with a stop byte at each place
+    // and every value of it, and pseudo-random words. It reads what the
+    // plain reader reads when that is at most 8 bytes and minimal, and
+    // gives up otherwise.
+    #[test]
+    fn word_varint_is_the_plain_reader() {
+        let check = |w: u64| {
+            let b = w.to_le_bytes();
+            let mut p = 0;
+            let plain = format::get_varint(&b, &mut p, 8);
+            let mut q = 0;
+            match (word_varint(w, &mut q), plain) {
+                (Some(x), Ok(y)) => assert!(x == y && q == p, "{w:#x}"),
+                (None, Ok(_)) => assert!(p > 8, "{w:#x}"),
+                (None, Err(_)) => {}
+                (Some(_), Err(e)) => panic!("{w:#x}: read, but {e:?}"),
+            }
+        };
+        for lo in 0..1u64 << 16 {
+            for hi in [0u64, 0x80, 0xff, 0x8080_8080_8080] {
+                check(lo | hi << 16);
+            }
+        }
+        for n in 0..8 {
+            for last in 0..256u64 {
+                for fill in [0x80u64, 0x81, 0xff, 0xc3] {
+                    let mut w = 0;
+                    for i in 0..n {
+                        w |= fill << (8 * i);
+                    }
+                    check(w | last << (8 * n));
+                    check(w | last << (8 * n) | 0x5a5a_5a5a_5a5a_5a5a << (8 * n) << 8);
+                }
+            }
+        }
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..1 << 22 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            check(x);
+            check(x | HIGH);
+            check(x & !HIGH | 0x80);
+        }
+    }
+
     #[test]
     fn block_exprs_u32_range() {
         let f = outcome_with(1 << 32, 1 << 33);

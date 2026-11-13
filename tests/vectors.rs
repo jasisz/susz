@@ -150,3 +150,86 @@ fn main_errors_come_before_block_errors() {
         o => panic!("{o:?}"),
     }
 }
+
+// The fast paths of the single pass read varints of up to 8 bytes with one
+// load and hand anything else to the checked reader. Every byte of the
+// base vector's MAIN and PROOFS is replaced by longer varint bytes (minimal
+// or not, up to 10 bytes and past), with the directory and trailer moved to
+// fit, so that the records around it are read through both paths. The
+// single pass, the two-pass check and the lazy order agree on each, and on
+// an accepted file hand out the same records.
+#[test]
+fn widened_bytes_read_alike() {
+    let v = vectors::all()
+        .into_iter()
+        .find(|v| v.name == "blocks")
+        .unwrap();
+    let a = vectors::build(&v);
+    let f = susz::read::File::open(&a.bytes).unwrap();
+    let mut seqs: Vec<Vec<u8>> = vec![
+        vec![0x80, 0x00],
+        vec![0x80, 0x01],
+        vec![0x81, 0x00],
+        vec![0x82, 0x00],
+        vec![0xff, 0x01],
+        vec![0x80, 0x80, 0x00],
+        vec![0x81, 0x80, 0x00],
+        vec![0x80, 0x80, 0x01],
+        vec![0xff, 0xff, 0x7f],
+    ];
+    for n in 4..=11 {
+        let mut s = vec![0x80; n - 1];
+        s.push(0x00);
+        seqs.push(s.clone());
+        s[0] = 0x81;
+        seqs.push(s.clone());
+        *s.last_mut().unwrap() = 0x01;
+        seqs.push(s);
+        let mut s = vec![0xff; n - 1];
+        s.push(0x01);
+        seqs.push(s);
+    }
+    let mut accepted = 0;
+    for s in &f.sections {
+        if s.id != susz::format::SEC_MAIN && s.id != susz::format::SEC_PROOFS {
+            continue;
+        }
+        for i in s.offset..s.offset + s.length {
+            for q in &seqs {
+                let b = splice(&a.bytes, &f, i as usize, q);
+                if let Err(e) = common::same_outcomes(&b) {
+                    panic!("byte {i} replaced by {q:x?}: the single pass differs:\n{e}");
+                }
+                if matches!(susz::verify(&b), susz::Outcome::Accepted(_)) {
+                    accepted += 1;
+                    if let Err(e) = common::same_events(&b) {
+                        panic!("byte {i} replaced by {q:x?}: {e}");
+                    }
+                }
+            }
+        }
+    }
+    assert!(accepted > 0);
+}
+
+// The file with byte `at` replaced by `with`: the section holding it grows,
+// the later sections and the directory move.
+fn splice(bytes: &[u8], f: &susz::read::File, at: usize, with: &[u8]) -> Vec<u8> {
+    let grow = with.len() as u64 - 1;
+    let mut out = bytes[..at].to_vec();
+    out.extend_from_slice(with);
+    out.extend_from_slice(&bytes[at + 1..]);
+    let ts = f.trailer as usize + grow as usize;
+    for (k, s) in f.sections.iter().enumerate() {
+        let e = ts + 20 + 24 * k;
+        let (mut off, mut len) = (s.offset, s.length);
+        if (at as u64) < s.offset {
+            off += grow;
+        } else if (at as u64) < s.offset + s.length {
+            len += grow;
+        }
+        out[e + 8..e + 16].copy_from_slice(&off.to_le_bytes());
+        out[e + 16..e + 24].copy_from_slice(&len.to_le_bytes());
+    }
+    out
+}

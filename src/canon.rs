@@ -28,27 +28,33 @@ fn mix(h: u64, x: u64) -> u64 {
     (h.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95)
 }
 
+#[inline(always)]
 fn hash_str(pre: u32, s: &[u8]) -> u32 {
     let mut h = mix(0x9e37_79b9, pre as u64);
     let mut c = s.chunks_exact(8);
     for w in &mut c {
         h = mix(h, u64::from_le_bytes(w.try_into().unwrap()));
     }
-    // the last bytes (fewer than 8) in one word, which with the length
-    // tells them apart
-    let r = c.remainder();
+    h = mix(h, tail(s, c.remainder()) ^ ((s.len() as u64) << 56));
+    (h >> 32) as u32
+}
+
+/// The last `r.len() % 8` bytes of `s` as a little-endian word, zero above
+/// them, without a copy: overlapping loads.
+#[inline(always)]
+fn tail(s: &[u8], r: &[u8]) -> u64 {
     let n = r.len();
-    let t = if n >= 4 {
+    if n == 0 {
+        0
+    } else if s.len() >= 8 {
+        u64::from_le_bytes(s[s.len() - 8..].try_into().unwrap()) >> (8 * (8 - n))
+    } else if n >= 4 {
         let lo = u32::from_le_bytes(r[..4].try_into().unwrap()) as u64;
         let hi = u32::from_le_bytes(r[n - 4..].try_into().unwrap()) as u64;
-        lo | (hi << 32)
-    } else if n > 0 {
-        r[0] as u64 | ((r[n / 2] as u64) << 8) | ((r[n - 1] as u64) << 16)
+        lo | hi << (8 * (n - 4))
     } else {
-        0
-    };
-    h = mix(h, t ^ ((s.len() as u64) << 56));
-    (h >> 32) as u32
+        r[0] as u64 | (r[n / 2] as u64) << (8 * (n / 2)) | (r[n - 1] as u64) << (8 * (n - 1))
+    }
 }
 
 fn hash_num(pre: u32, k: u64) -> u32 {
@@ -265,5 +271,23 @@ impl Canon {
             }
         }
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // tail gives the remainder zero-padded, as a copy into a zeroed word
+    #[test]
+    fn tail_is_the_padded_remainder() {
+        let b: Vec<u8> = (1..=40).collect();
+        for len in 0..40 {
+            let s = &b[..len];
+            let r = s.chunks_exact(8).remainder();
+            let mut t = [0u8; 8];
+            t[..r.len()].copy_from_slice(r);
+            assert_eq!(tail(s, r), u64::from_le_bytes(t), "length {len}");
+        }
     }
 }
