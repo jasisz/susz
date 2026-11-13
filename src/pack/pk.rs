@@ -148,17 +148,16 @@ impl Ren {
     }
 }
 
-// Expressions are numbered below 2^30 - 1: the columns keep two bits of
-// the kind above each child's id.
-pub const MAX_EXPRS: u32 = LOW;
-// The expressions in columns, by id. a and b hold the children of an
-// application or binder (ids below 2^30) and its kind in their top two
-// bits: the low two bits of the kind in a's, the high two in b's (kind 0, a
-// leaf: any expression that is not an application or a binder). names
-// holds each binder's name in turn. A leaf's record (as section 9 writes
-// it, with absolute ids) is in x, at loffs, in turn.
+// Expressions are numbered below 2^32 - 1, as the format allows.
+pub const MAX_EXPRS: u32 = u32::MAX;
+// The expressions in columns, by id. k holds the kind (0, a leaf: any
+// expression that is not an application or a binder), a and b the children
+// of an application or binder. names holds each binder's name in turn. A
+// leaf's record (as section 9 writes it, with absolute ids) is in x, at
+// loffs, in turn.
 #[derive(Default)]
 pub struct Cols {
+    pub k: Vec<u8>,
     pub a: Vec<u32>,
     pub b: Vec<u32>,
     pub names: Vec<u32>,
@@ -169,27 +168,13 @@ pub struct Cols {
 impl Cols {
     pub fn give_back(self) {
         use super::give_back;
+        give_back(self.k);
         give_back(self.a);
         give_back(self.b);
         give_back(self.names);
         give_back(self.x);
         give_back(self.loffs);
     }
-}
-
-#[inline(always)]
-pub fn col_a(x: u32, k: u32) -> u32 {
-    x | (k << 30)
-}
-#[inline(always)]
-pub fn col_b(y: u32, k: u32) -> u32 {
-    y | ((k & 12) << 28)
-}
-
-// The kind and children of a and b as the columns hold them.
-#[inline(always)]
-pub fn split(a: u32, b: u32) -> (u32, u32, u32) {
-    ((a >> 30) | ((b >> 30) << 2), a & LOW, b & LOW)
 }
 
 // An application or binder read back: kind and name (as k), children.
@@ -215,11 +200,12 @@ pub struct Pk {
     pub decls: u32,
     pub run: u32,
     pub stream: Vec<u8>,
-    // the expressions read: a and b written at the expression's id through
-    // ap and bp, room for colcap (one allocation for every expression the
-    // file can hold; workers share one and write at global ids); the other
-    // columns are a worker's own until merged
+    // the expressions read: k, a and b written at the expression's id
+    // through kp, ap and bp, room for colcap (one allocation for every
+    // expression the file can hold; workers share one and write at global
+    // ids); the other columns are a worker's own until merged
     pub cols: Cols,
+    pub kp: *mut u8,
     pub ap: *mut u32,
     pub bp: *mut u32,
     pub colcap: u64,
@@ -267,6 +253,7 @@ impl Pk {
             run: 0,
             stream: Vec::with_capacity(size_hint / 16 + 1024),
             cols: Cols::default(),
+            kp: std::ptr::null_mut(),
             ap: std::ptr::null_mut(),
             bp: std::ptr::null_mut(),
             colcap: 0,
@@ -350,8 +337,10 @@ impl Pk {
     // pages are only taken as they are written.
     pub fn reserve_all(&mut self, size: usize) {
         let cap = size / 16 + 16;
+        self.cols.k = Vec::with_capacity(cap);
         self.cols.a = Vec::with_capacity(cap);
         self.cols.b = Vec::with_capacity(cap);
+        self.kp = self.cols.k.as_mut_ptr();
         self.ap = self.cols.a.as_mut_ptr();
         self.bp = self.cols.b.as_mut_ptr();
         self.colcap = cap as u64;
@@ -364,6 +353,7 @@ impl Pk {
         self.finish_range();
         self.owner.resize(self.exprs as usize, NONE);
         unsafe {
+            self.cols.k.set_len(self.exprs as usize);
             self.cols.a.set_len(self.exprs as usize);
             self.cols.b.set_len(self.exprs as usize);
         }
@@ -381,8 +371,8 @@ impl Pk {
             self.er.below = ie;
         }
         let e = self.exprs;
-        if e >= MAX_EXPRS {
-            return Err(cant!("too many expressions for this packer"));
+        if e == MAX_EXPRS {
+            return Err(cant!("more than 2^32 - 1 expressions"));
         }
         self.er.define(ie, e, "expression")?;
         if e as u64 >= self.colcap {
@@ -396,8 +386,9 @@ impl Pk {
     fn new_expr(&mut self, ie: u64, k: u32, a: u32, b: u32) -> R<()> {
         let e = self.begin(ie)?;
         unsafe {
-            self.ap.add(e as usize).write(col_a(a, k));
-            self.bp.add(e as usize).write(col_b(b, k));
+            self.kp.add(e as usize).write((k & 15) as u8);
+            self.ap.add(e as usize).write(a);
+            self.bp.add(e as usize).write(b);
         }
         if k & 15 >= 2 {
             self.cols.names.push(k >> 4);
@@ -407,6 +398,7 @@ impl Pk {
     fn new_leaf(&mut self, ie: u64) -> R<()> {
         let e = self.begin(ie)?;
         unsafe {
+            self.kp.add(e as usize).write(0);
             self.ap.add(e as usize).write(0);
             self.bp.add(e as usize).write(0);
         }

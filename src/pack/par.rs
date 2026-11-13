@@ -15,7 +15,7 @@ use super::{cant, R};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 
-struct SendPtr(*mut u32, *mut u32);
+struct SendPtr(*mut u8, *mut u32, *mut u32);
 unsafe impl Send for SendPtr {}
 unsafe impl Sync for SendPtr {}
 
@@ -122,11 +122,12 @@ pub fn parse_parallel(path: &str, threads: usize) -> R<Option<Pk>> {
         cuts.push(c.max(*cuts.last().unwrap()));
     }
     cuts.push(size);
-    // one allocation of the a and b columns for all
+    // one allocation of the k, a and b columns for all
     let cap = size as usize / 16 + 16;
+    let mut ck: Vec<u8> = Vec::with_capacity(cap);
     let mut ca: Vec<u32> = Vec::with_capacity(cap);
     let mut cb: Vec<u32> = Vec::with_capacity(cap);
-    let colp = SendPtr(ca.as_mut_ptr(), cb.as_mut_ptr());
+    let colp = SendPtr(ck.as_mut_ptr(), ca.as_mut_ptr(), cb.as_mut_ptr());
     let colp = &colp;
     let results: Vec<R<Pk>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..threads)
@@ -134,8 +135,9 @@ pub fn parse_parallel(path: &str, threads: usize) -> R<Option<Pk>> {
                 let (from, to) = (cuts[k], cuts[k + 1]);
                 sc.spawn(move || {
                     let mut w = Pk::new_worker((to - from) as usize);
-                    w.ap = colp.0;
-                    w.bp = colp.1;
+                    w.kp = colp.0;
+                    w.ap = colp.1;
+                    w.bp = colp.2;
                     w.colcap = cap as u64;
                     parse_range(path, from, to, &mut w).map(|_| w)
                 })
@@ -183,9 +185,11 @@ pub fn parse_parallel(path: &str, threads: usize) -> R<Option<Pk>> {
     let mut stream = Vec::with_capacity(total_stream);
     let mut dmeta: Vec<u32> = Vec::new();
     unsafe {
+        ck.set_len(n);
         ca.set_len(n);
         cb.set_len(n);
     }
+    pk.cols.k = ck;
     pk.cols.a = ca;
     pk.cols.b = cb;
     pk.cols.names = Vec::with_capacity(ws.iter().map(|w| w.cols.names.len()).sum());

@@ -1,16 +1,17 @@
 // The walk back (owners, numbers, the frontier's items) and the writer of
 // the canonical layout (spec section 9).
 
-use super::pk::{rv, split, wv, Dec, Pk, FLAG, LOW, MAIN, NONE};
+use super::pk::{rv, wv, Dec, Pk, FLAG, LOW, MAIN, NONE};
 use super::{cant, inv, Stats, R};
 use crate::format;
 use std::io::Write;
 
 const UNUSED: u32 = u32::MAX;
 const USED: u32 = u32::MAX - 1;
-// An owner slot, once its expression is written: in MAIN at the position
-// below, or (bit clear) in a block at that position.
-const POS_MAIN: u32 = 1 << 31;
+// An owner slot, once its expression is written: its position in MAIN, or
+// this for an expression in a block (its position there is in its a column).
+// No MAIN position is that large: there are at most 2^32 - 1 expressions.
+const OWNED: u32 = u32::MAX;
 
 #[derive(Default)]
 struct Acc {
@@ -85,7 +86,7 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
     let mut level_f: Vec<u32> = vec![UNUSED; pk.levels as usize];
     let mut m: u32 = 0;
     let mut cols = std::mem::take(&mut pk.cols);
-    if cols.a.len() != n || cols.b.len() != n || pk.owner.len() != n {
+    if cols.k.len() != n || cols.a.len() != n || cols.b.len() != n || pk.owner.len() != n {
         return Err(cant!("internal: expression counts disagree"));
     }
     // The walk back: an expression is owned by theorem T when only T's value
@@ -95,11 +96,12 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
         let ow = pk.owner.as_mut_ptr();
         {
             let sg = &cols;
-            let (av, bv, nmv) = (sg.a.as_ptr(), sg.b.as_ptr(), sg.names.as_ptr());
+            let (kv, av, bv) = (sg.k.as_ptr(), sg.a.as_ptr(), sg.b.as_ptr());
+            let nmv = sg.names.as_ptr();
             let mut ni = sg.names.len();
             let mut li = sg.loffs.len();
             for e in (0..n).rev() {
-                let (kind, ca, cb) = split(*av.add(e), *bv.add(e));
+                let (kind, ca, cb) = (*kv.add(e) as u32, *av.add(e), *bv.add(e));
                 let x = *ow.add(e);
                 let mut v = x & !FLAG;
                 if v == NONE {
@@ -200,10 +202,10 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
         f_l += 1;
     }
     // Going forward, each expression's owner slot is replaced, once its
-    // record is written, by its position: its number in its block, or
-    // POS_MAIN and its number in MAIN. A frontier item's number among the
-    // items replaces its a column, whose children are read by then.
-    // PROOFS grows while the b and names columns already read are given
+    // record is written, by its number in MAIN, or by OWNED for one in a
+    // block. Its a column, whose children are read by then, takes its number
+    // in its block, or a frontier item's number among the items.
+    // PROOFS grows while the k, b and names columns already read are given
     // back (its pages are only taken as they are written).
     let mut proofs: Vec<u8> = Vec::with_capacity(n * 3 + n / 2 + 4096);
     let (mut name_id, mut level_id) = (1usize, 1usize);
@@ -215,9 +217,10 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
     let ow = pk.owner.as_mut_ptr();
     // the next binder's name, the next leaf
     let (mut sn, mut sl) = (0usize, 0usize);
-    // the b and names columns are given back below these
+    // the k, b and names columns are given back below these
     let (mut rel, mut nrel) = (0usize, 0usize);
-    let (sa, sb, snm) = (cols.a.as_mut_ptr(), cols.b.as_ptr(), cols.names.as_ptr());
+    let (sk, sa, sb) = (cols.k.as_ptr(), cols.a.as_mut_ptr(), cols.b.as_ptr());
+    let snm = cols.names.as_ptr();
     let slo = cols.loffs.as_ptr();
     let mut p = 0usize;
     while p < s.len() {
@@ -268,6 +271,7 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
                         out.clear();
                     }
                     if e as usize - rel >= 1 << 20 {
+                        super::give_back_range(&cols.k, rel, e as usize);
                         super::give_back_range(&cols.b, rel, e as usize);
                         rel = e as usize;
                     }
@@ -276,7 +280,7 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
                         nrel = sn;
                     }
                     let sx = &cols.x[..];
-                    let cend = end.min(e + 32768);
+                    let cend = end.min(e.saturating_add(32768));
                     out.reserve(32768 * 24);
                     unsafe {
                         let mut ob = out.as_mut_ptr();
@@ -309,7 +313,7 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
                         while e < cend {
                             let x = *ow.add(e as usize);
                             let i = e as usize;
-                            let (kind, xa, xb) = split(*sa.add(i), *sb.add(i));
+                            let (kind, xa, xb) = (*sk.add(i) as u32, *sa.add(i), *sb.add(i));
                             let (c, lo) = if kind != 0 {
                                 let mut c = Dec {
                                     k: kind,
@@ -327,7 +331,7 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
                             };
                             if x & MAIN != 0 {
                                 let re = mnext;
-                                let mref = |c: u32| (re - (*ow.add(c as usize) & !POS_MAIN)) as u64;
+                                let mref = |c: u32| (re - *ow.add(c as usize)) as u64;
                                 match kind {
                                     1 => {
                                         *op = 10;
@@ -357,7 +361,7 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
                                     *sa.add(i) = f_e;
                                     f_e += 1;
                                 }
-                                *ow.add(e as usize) = POS_MAIN | mnext;
+                                *ow.add(i) = mnext;
                                 mnext += 1;
                             } else {
                                 let o = (x & LOW) as usize;
@@ -383,12 +387,12 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
                                 }
                                 let kloc = ck;
                                 let er = |c: u32| -> u64 {
-                                    let y = *ow.add(c as usize);
-                                    if y & POS_MAIN == 0 {
-                                        (kloc - y) as u64
+                                    let z = *sa.add(c as usize);
+                                    if *ow.add(c as usize) == OWNED {
+                                        (kloc - z) as u64
                                     } else {
                                         // a frontier item (spec 9)
-                                        kloc as u64 + 1 + *sa.add(c as usize) as u64
+                                        kloc as u64 + 1 + z as u64
                                     }
                                 };
                                 match kind {
@@ -415,7 +419,8 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
                                         reload!();
                                     }
                                 }
-                                *ow.add(e as usize) = kloc;
+                                *ow.add(i) = OWNED;
+                                *sa.add(i) = kloc;
                                 ck += 1;
                             }
                             e += 1;
@@ -435,8 +440,7 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool) -> R<Stats> {
                     ix_kind.push(if is_lazy { 6 } else { kind });
                 }
                 out.push(18);
-                let newid_back =
-                    |c: u32| -> u64 { (mnext - (pk.owner[c as usize] & !POS_MAIN)) as u64 };
+                let newid_back = |c: u32| -> u64 { (mnext - pk.owner[c as usize]) as u64 };
                 if is_lazy {
                     let acc = std::mem::take(&mut accs[di as usize]);
                     let blen = acc.buf.len() as u64;

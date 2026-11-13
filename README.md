@@ -46,20 +46,20 @@ matter how many threads you use. `--no-index` leaves the index out. The output
 only appears once it is complete, so you never end up with half a file.
 
 `pack` reads the export once, in pieces, and never holds all of it. What it
-does hold is the expressions: two 4-byte columns and a 4-byte owner for each
-one, which is most of its memory. Packing mathlib (105 million expressions) on
-the M2 Pro below, median of three warm runs, with INDEX ("before" is the
-previous packer, which kept 20 bytes per expression and freed nothing until
-the end):
+does hold is the expressions: a 1-byte kind, two 4-byte columns for the
+children and a 4-byte owner for each one, which is most of its memory. The
+kind has a byte of its own so that the children's ids can use all 32 bits.
+That costs about 100 MB on mathlib, and `pack` takes up to 2^32 − 1
+expressions, as many as the format allows. Packing mathlib (105 million
+expressions) on the M2 Pro below, median of three warm runs:
 
 | | wall | instructions | peak footprint | max RSS |
 | --- | --- | --- | --- | --- |
-| 1 thread, before | 5.3 s | 36.4 G | 2678 MB | 2677 MB |
-| 1 thread | 5.4 s | 38.0 G | 1548 MB | 1943 MB |
-| 4 threads, before | 3.5 s | 36.7 G | 2775 MB | 2774 MB |
-| 4 threads | 3.5 s | 38.5 G | 1531 MB | 2058 MB |
+| 1 thread | 5.5 s | 38.6 G | 1648 MB | 2043 MB |
+| 1 thread, `--no-index` | 5.5 s | 36.8 G | 1644 MB | 1947 MB |
+| 4 threads | 3.6 s | 39.3 G | 1631 MB | 2158 MB |
+| 4 threads, `--no-index` | 3.4 s | 37.4 G | 1628 MB | 2071 MB |
 
-Without INDEX it is about 5% fewer instructions and the same memory.
 (MB here are MiB.) The max RSS is higher than the footprint because the
 columns `pack` is done with are handed back to the system as it goes; macOS
 still counts those pages as resident until it needs them.

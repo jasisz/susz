@@ -2,7 +2,7 @@
 // writes parsed by position, any other line through the JSON parser.
 
 use super::json::{self, J};
-use super::pk::{col_a, col_b, Pk, MAX_EXPRS};
+use super::pk::{Pk, MAX_EXPRS};
 use super::{cant, R};
 use std::io::Read;
 
@@ -186,7 +186,7 @@ pub fn col_run(pk: &mut Pk, b: &[u8], mut p: usize, lim: usize) -> (usize, u64) 
     let e0 = pk.exprs as u64;
     let mut e = e0;
     let ecap = pk.colcap.min(MAX_EXPRS as u64);
-    let (ap, bp) = (pk.ap, pk.bp);
+    let (kp, ap, bp) = (pk.kp, pk.ap, pk.bp);
     // a line takes at least 16 bytes
     pk.cols.names.reserve((lim - p) / 16 + 1);
     let mut np = unsafe { pk.cols.names.as_mut_ptr().add(pk.cols.names.len()) };
@@ -281,8 +281,9 @@ pub fn col_run(pk: &mut Pk, b: &[u8], mut p: usize, lim: usize) -> (usize, u64) 
             break;
         }
         unsafe {
-            ap.add(e as usize).write(col_a(x as u32, k));
-            bp.add(e as usize).write(col_b(y as u32, k));
+            kp.add(e as usize).write((k & 15) as u8);
+            ap.add(e as usize).write(x as u32);
+            bp.add(e as usize).write(y as u32);
             if k & 15 >= 2 {
                 np.write(k >> 4);
                 np = np.add(1);
