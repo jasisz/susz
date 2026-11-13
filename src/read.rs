@@ -2205,11 +2205,9 @@ impl<'a> Block<'a> {
         if d < k {
             return Some(Ref::Block((k - r) as u32));
         }
-        // r >= 1 and r - 1 >= k here unless r = 0
-        if r == 0 {
-            return None;
-        }
-        let f = usize::try_from(r - k - 1).ok()?;
+        // a frontier entry r - k - 1 = d - k; r = 0 gives d = 2^64 - 1, far
+        // past any frontier table
+        let f = usize::try_from(d - k).ok()?;
         self.fexprs.get(f).map(|&e| Ref::Main(e))
     }
 
