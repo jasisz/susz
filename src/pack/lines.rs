@@ -356,11 +356,18 @@ impl Reader {
             p = nl + 1;
         }
         while p < lim {
-            let (q, cnt) = col_run(pk, b, p, lim);
-            self.line += cnt;
-            p = q;
-            if p >= lim {
-                break;
+            // the lines col_run takes
+            let w = ld8(b, p);
+            if w == u64::from_le_bytes(*b"{\"app\":{")
+                || w == u64::from_le_bytes(*b"{\"forall")
+                || w & 0xFFFF_FFFF_FFFF == u64::from_le_bytes(*b"{\"ie\":\0\0")
+            {
+                let (q, cnt) = col_run(pk, b, p, lim);
+                self.line += cnt;
+                p = q;
+                if p >= lim {
+                    break;
+                }
             }
             self.line += 1;
             match self.fast(pk, b, p) {
