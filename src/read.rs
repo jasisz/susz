@@ -2427,6 +2427,53 @@ mod tests {
     // block-exprs is limited to 2^32 - 1 (spec 7.1), decided from the
     // record before any block is read: 2^32 is a block-exprs error, 2^32 - 1
     // passes that check and fails only because the block is not there.
+    // The fast paths' varint reader against the plain one: every word whose
+    // first two bytes take any value, words with a stop byte at each place
+    // and every value of it, and pseudo-random words. It reads what the
+    // plain reader reads when that is at most 8 bytes and minimal, and
+    // gives up otherwise.
+    #[test]
+    fn word_varint_is_the_plain_reader() {
+        let check = |w: u64| {
+            let b = w.to_le_bytes();
+            let mut p = 0;
+            let plain = format::get_varint(&b, &mut p, 8);
+            let mut q = 0;
+            match (word_varint(w, &mut q), plain) {
+                (Some(x), Ok(y)) => assert!(x == y && q == p, "{w:#x}"),
+                (None, Ok(_)) => assert!(p > 8, "{w:#x}"),
+                (None, Err(_)) => {}
+                (Some(_), Err(e)) => panic!("{w:#x}: read, but {e:?}"),
+            }
+        };
+        for lo in 0..1u64 << 16 {
+            for hi in [0u64, 0x80, 0xff, 0x8080_8080_8080] {
+                check(lo | hi << 16);
+            }
+        }
+        for n in 0..8 {
+            for last in 0..256u64 {
+                for fill in [0x80u64, 0x81, 0xff, 0xc3] {
+                    let mut w = 0;
+                    for i in 0..n {
+                        w |= fill << (8 * i);
+                    }
+                    check(w | last << (8 * n));
+                    check(w | last << (8 * n) | 0x5a5a_5a5a_5a5a_5a5a << (8 * n) << 8);
+                }
+            }
+        }
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..1 << 22 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            check(x);
+            check(x | HIGH);
+            check(x & !HIGH | 0x80);
+        }
+    }
+
     #[test]
     fn block_exprs_u32_range() {
         let f = outcome_with(1 << 32, 1 << 33);
