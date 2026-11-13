@@ -623,15 +623,7 @@ unsafe fn owned_run(
         }
         let kind = *sk.add(i) as u32;
         let kloc = ck;
-        let er = |c: u32| -> u64 {
-            let z = *sa.add(c as usize);
-            if *ow.add(c as usize) == OWNED {
-                (kloc - z) as u64
-            } else {
-                // a frontier item (spec 9)
-                kloc as u64 + 1 + z as u64
-            }
-        };
+        let er = |c: u32| -> u64 { owned_ref(ow, sa, kloc, c) };
         match kind {
             1 => {
                 *cp = 10;
@@ -650,7 +642,8 @@ unsafe fn owned_run(
                 let lo = *slo.add(sl) as usize;
                 sl += 1;
                 a.buf.set_len(cp.offset_from(cb) as usize);
-                owned_other(sx, lo, &mut a.buf, &er, name_f, level_f);
+                let erd = move |c: u32| -> u64 { owned_ref(ow, sa, kloc, c) };
+                owned_other(sx, lo, &mut a.buf, &erd, name_f, level_f);
                 a.buf.reserve(64);
                 cb = a.buf.as_mut_ptr();
                 cp = cb.add(a.buf.len());
@@ -667,6 +660,18 @@ unsafe fn owned_run(
     em.sn = sn;
     em.sl = sl;
     e
+}
+
+// The reference from the expression numbered kloc in its block to c: back
+// to an expression of the block, or to a frontier item (spec 9).
+#[inline(always)]
+unsafe fn owned_ref(ow: *mut u32, sa: *mut u32, kloc: u32, c: u32) -> u64 {
+    let z = *sa.add(c as usize);
+    if *ow.add(c as usize) == OWNED {
+        (kloc - z) as u64
+    } else {
+        kloc as u64 + 1 + z as u64
+    }
 }
 
 // The INDEX section (spec 6a.1).
