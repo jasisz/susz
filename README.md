@@ -161,14 +161,20 @@ the file a second time.
 | | Init: instructions, wall | mathlib: instructions, wall, peak footprint |
 | --- | --- | --- |
 | `verify`, before | 1.75 G, 0.14 s | 29.8 G, 2.7 s, 210 MiB |
-| `verify` | 0.82 G, 0.11 s | 13.4 G, 1.9 s, 182 MiB |
+| `verify`, 0.1.0 | 0.82 G, 0.11 s | 13.4 G, 1.9 s, 182 MiB |
+| `verify` | 0.51 G, 0.07 s | 8.1 G, 1.3 s, 183 MiB |
 | `verify`, then the records again, before | 3.64 G, 0.29 s | 62.6 G, 5.7 s, 335 MiB |
-| `decode`, each block at its theorem | 1.14 G, 0.12 s | 19.0 G, 2.2 s, 198 MiB |
-| `decode`, then each block with `decode_block` | 1.10 G, 0.11 s | 18.5 G, 2.0 s, 210 MiB |
+| `decode`, each block at its theorem, 0.1.0 | 1.14 G, 0.12 s | 19.0 G, 2.2 s, 198 MiB |
+| `decode`, each block at its theorem | 0.82 G, 0.09 s | 13.6 G, 1.8 s, 198 MiB |
+| `decode`, then each block with `decode_block` | 0.81 G, 0.08 s | 13.4 G, 1.6 s, 210 MiB |
 
 Most of the gain over the old reader is not the single pass itself. Varints
-of two to eight bytes are now read with one 8-byte load instead of a byte at
-a time, and the record readers are inlined into the loop.
+of two to eight bytes are read with one 8-byte load instead of a byte at a
+time, and the common records (applications, binders, constants, names,
+frontier entries) take a fast path: read from a fixed window of the file with
+plain loads, accepted only when every check passes, and otherwise read again
+by the checked reader, which gives the error and its place. Of the 13.6 G of
+`decode` on mathlib, about 5 G is the visitor adding up the fields.
 
 The pieces underneath are public too: `susz::read::File::open` opens a file
 and checks its framing, `File::main()` walks the records, `susz::read::Block`
