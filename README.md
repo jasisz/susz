@@ -57,14 +57,17 @@ children and a 4-byte owner for each one, which is most of its memory. The
 kind has a byte of its own so that the children's ids can use all 32 bits.
 That costs about 100 MB on mathlib, and `pack` takes up to 2^32 − 1
 expressions, as many as the format allows. Packing mathlib (105 million
-expressions) on the M2 Pro below, median of three warm runs:
+expressions) on the M2 Pro below, median of three warm runs (with the
+index, two):
 
 | | wall | instructions | peak footprint | max RSS |
 | --- | --- | --- | --- | --- |
-| 1 thread | 5.1 s | 34.5 G | 1647 MB | 2043 MB |
-| 1 thread, `--no-index` | 4.9 s | 32.4 G | 1643 MB | 1946 MB |
-| 4 threads | 3.4 s | 35.0 G | 1630 MB | 2157 MB |
-| 4 threads, `--no-index` | 3.3 s | 33.1 G | 1627 MB | 2069 MB |
+| 1 thread | 5.1 s | 34.0 G | 1652 MB | 2053 MB |
+| 1 thread, `--no-index` | 4.7 s | 31.9 G | 1570 MB | 1976 MB |
+| 4 threads | 2.2 s | 34.4 G | 1651 MB | 2149 MB |
+| 4 threads, `--no-index` | 1.9 s | 32.4 G | 1600 MB | 2080 MB |
+| 8 threads | 1.8 s | 34.5 G | 1772 MB | 2298 MB |
+| 8 threads, `--no-index` | 1.5 s | 32.4 G | 1706 MB | 2232 MB |
 
 (MB here are MiB.) The max RSS is higher than the footprint because the
 columns `pack` is done with are handed back to the system as it goes; macOS
