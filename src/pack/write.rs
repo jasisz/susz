@@ -214,16 +214,13 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool, threads: usize) -> R
             n as u32
         };
     }
-    // INDEX's name table is all that needs the canonical names: made now
-    // (beside the walk back on a worker), they are given back before writing
+    // INDEX's name table is all that needs the canonical names: made now,
+    // they are given back before the walk back
     let mut table: Vec<u8> = Vec::new();
-    let table_now = with_index && threads <= 1;
-    if table_now {
+    if with_index {
         table = name_table(&pk.cn, &pk.canon, &pk.dmeta, &pk.stream);
     }
-    if !(with_index && !table_now) {
-        give_back_names(&mut pk.cn, &mut pk.canon, &mut pk.dmeta);
-    }
+    give_back_names(&mut pk.cn, &mut pk.canon, &mut pk.dmeta);
     // block sizes, by declaration
     let mut size: Vec<u32> = vec![0; nd];
     let mut runs: Vec<Run> = Vec::new();
@@ -237,73 +234,60 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool, threads: usize) -> R
     // block expressions' slots get the top bit when no count can reach it
     let top = if n <= 1 << 31 { BLOCK } else { 0 };
     let (owp, kvp) = (pk.owner.as_mut_ptr(), cols.k.as_mut_ptr());
-    let walked: R<u32> = std::thread::scope(|sc| {
-        let th = if with_index && !table_now {
-            let (cn, canon, dmeta) = (&pk.cn, &pk.canon[..], &pk.dmeta[..]);
-            Some(sc.spawn(move || name_table(cn, canon, dmeta, s)))
-        } else {
-            None
-        };
-        let r = (|| -> R<u32> {
-            unsafe {
-                let mut wk = Wk {
-                    ow: owp,
-                    kv: kvp,
-                    av: cols.a.as_ptr(),
-                    bv: cols.b.as_ptr(),
-                    nmv: cols.names.as_ptr(),
-                    fw: fw.as_mut_ptr(),
-                    ni: cols.names.len(),
-                    li: cols.loffs.len(),
-                    m: 0,
-                };
-                let mut e = n;
-                for sg in segs.iter_mut().rev() {
-                    let lo = sg.e0 as usize;
-                    while e > lo {
-                        let v = *wk.ow.add(e - 1) & !FLAG;
-                        e = if v >= NONE {
-                            walk_main(&mut wk, e, lo, &cols.x, &cols.loffs)
-                        } else {
-                            let c = walk_owned(
-                                &mut wk,
-                                e,
-                                lo,
-                                v,
-                                size[v as usize],
-                                top,
-                                &cols.x,
-                                &cols.loffs,
-                                &mut name_f,
-                                &mut level_f,
-                            );
-                            size[v as usize] = c.1;
-                            runs.push(Run {
-                                start: c.0 as u32,
-                                end: e as u32,
-                                o: v,
-                            });
-                            c.0
-                        };
-                    }
-                    sg.sn = wk.ni;
-                    sg.sl = wk.li;
-                    // MAIN expressions after the start, for now
-                    sg.m0 = wk.m;
+    let walked = (|| -> R<u32> {
+        unsafe {
+            let mut wk = Wk {
+                ow: owp,
+                kv: kvp,
+                av: cols.a.as_ptr(),
+                bv: cols.b.as_ptr(),
+                nmv: cols.names.as_ptr(),
+                fw: fw.as_mut_ptr(),
+                ni: cols.names.len(),
+                li: cols.loffs.len(),
+                m: 0,
+            };
+            let mut e = n;
+            for sg in segs.iter_mut().rev() {
+                let lo = sg.e0 as usize;
+                while e > lo {
+                    let v = *wk.ow.add(e - 1) & !FLAG;
+                    e = if v >= NONE {
+                        walk_main(&mut wk, e, lo, &cols.x, &cols.loffs)
+                    } else {
+                        let c = walk_owned(
+                            &mut wk,
+                            e,
+                            lo,
+                            v,
+                            size[v as usize],
+                            top,
+                            &cols.x,
+                            &cols.loffs,
+                            &mut name_f,
+                            &mut level_f,
+                        );
+                        size[v as usize] = c.1;
+                        runs.push(Run {
+                            start: c.0 as u32,
+                            end: e as u32,
+                            o: v,
+                        });
+                        c.0
+                    };
                 }
-                if wk.ni != 0 || wk.li != 0 {
-                    return Err(cant!("internal: records disagree"));
-                }
-                Ok(wk.m)
+                sg.sn = wk.ni;
+                sg.sl = wk.li;
+                // MAIN expressions after the start, for now
+                sg.m0 = wk.m;
             }
-        })();
-        if let Some(h) = th {
-            table = h.join().unwrap();
+            if wk.ni != 0 || wk.li != 0 {
+                return Err(cant!("internal: records disagree"));
+            }
+            Ok(wk.m)
         }
-        r
-    });
+    })();
     let mm: u32 = walked?;
-    give_back_names(&mut pk.cn, &mut pk.canon, &mut pk.dmeta);
     runs.reverse();
     let mut f0 = 0u64;
     for x in fw.iter_mut() {
