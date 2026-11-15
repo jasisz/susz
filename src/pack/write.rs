@@ -174,7 +174,6 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool, threads: usize) -> R
     unique_names(&pk)?;
     let mut name_f: Vec<u32> = vec![UNUSED; pk.names as usize];
     let mut level_f: Vec<u32> = vec![UNUSED; pk.levels as usize];
-    let mm: u32;
     let mut cols = std::mem::take(&mut pk.cols);
     if cols.k.len() != n || cols.a.len() != n || cols.b.len() != n || pk.owner.len() != n {
         return Err(cant!("internal: expression counts disagree"));
@@ -303,7 +302,7 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool, threads: usize) -> R
         }
         r
     });
-    mm = walked?;
+    let mm: u32 = walked?;
     give_back_names(&mut pk.cn, &mut pk.canon, &mut pk.dmeta);
     runs.reverse();
     let mut f0 = 0u64;
