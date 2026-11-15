@@ -134,8 +134,15 @@ fn release(from: usize, to: usize) {
 pub struct Options {
     /// Write the INDEX section (the default).
     pub index: bool,
-    /// Workers reading the input (1: one thread). The output does not depend on it.
+    /// Workers reading the input and writing the output (1, the default:
+    /// one thread). The output does not depend on it.
     pub threads: usize,
+}
+
+/// The number of threads the `susz` command packs on unless told otherwise:
+/// as many as the system says can run at once, 1 if it cannot tell.
+pub fn all_cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
 impl Default for Options {

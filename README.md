@@ -46,8 +46,9 @@ susz verify FILE.susz [--index]
 susz unpack FILE.susz OUT.ndjson
 ```
 
-`pack` converts an export. The same export always gives the same bytes, no
-matter how many threads you use. `--no-index` leaves the index out. The output
+`pack` converts an export. It uses all cores unless `--threads N` says how
+many threads to use; the same export always gives the same bytes, no matter
+how many threads. `--no-index` leaves the index out. The output
 only appears once it is complete, so you never end up with half a file.
 
 `pack` reads the export once, in pieces, and never holds all of it. What it
