@@ -86,6 +86,31 @@ impl Canon {
             len: vec![u32::MAX - 1],
         }
     }
+    /// Frees the tables, their pages first (see `pack::give_back`).
+    pub(crate) fn give_back(self) {
+        crate::pack::give_back(self.slots);
+        crate::pack::give_back(self.hash);
+        crate::pack::give_back(self.pre);
+        crate::pack::give_back(self.off);
+        crate::pack::give_back(self.len);
+    }
+    /// A table with room for `n` names, so that it does not grow before.
+    pub fn with_capacity(n: usize) -> Canon {
+        let slots = (2 * n + 2).next_power_of_two().max(1 << 16);
+        let mut c = Canon {
+            slots: vec![0; slots],
+            mask: slots - 1,
+            hash: Vec::with_capacity(n + 1),
+            pre: Vec::with_capacity(n + 1),
+            off: Vec::with_capacity(n + 1),
+            len: Vec::with_capacity(n + 1),
+        };
+        c.hash.push(0);
+        c.pre.push(u32::MAX);
+        c.off.push(0);
+        c.len.push(u32::MAX - 1);
+        c
+    }
     pub fn count(&self) -> usize {
         self.hash.len()
     }

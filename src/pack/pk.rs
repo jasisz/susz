@@ -10,7 +10,6 @@ use std::collections::HashMap;
 pub const NONE: u32 = 0x3FFF_FFFF;
 pub const MAIN: u32 = 1 << 30;
 pub const FLAG: u32 = 1 << 31;
-pub const LOW: u32 = MAIN - 1;
 
 #[inline(always)]
 pub fn wv(out: &mut Vec<u8>, mut v: u64) {
@@ -148,6 +147,54 @@ impl Ren {
     }
 }
 
+// The writer works in segments of this many expressions (a multiple of 32).
+pub const SEG: u64 = 1 << 19;
+
+// Where in the stream a segment starts: at record p, or just after the header
+// of a run record at p with `left` of its expressions from e0 on; and the
+// ids of the next name, level and declaration there.
+pub struct SegStart {
+    pub p: usize,
+    pub left: u32,
+    pub e0: u32,
+    pub name_id: u32,
+    pub level_id: u32,
+    pub di: u32,
+}
+
+// Notes the segments that start in a run record of k expressions after e,
+// written at p0 with its header ending at p1; b is the next segment's start.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+pub fn note_segs(
+    segs: &mut Vec<SegStart>,
+    b: &mut u64,
+    p0: usize,
+    p1: usize,
+    e: u64,
+    k: u64,
+    name_id: u32,
+    level_id: u32,
+    di: u32,
+) {
+    while *b < e + k {
+        let (p, left) = if *b == e {
+            (p0, 0)
+        } else {
+            (p1, (e + k - *b) as u32)
+        };
+        segs.push(SegStart {
+            p,
+            left,
+            e0: *b as u32,
+            name_id,
+            level_id,
+            di,
+        });
+        *b += SEG;
+    }
+}
+
 // Expressions are numbered below 2^32 - 1, as the format allows.
 pub const MAX_EXPRS: u32 = u32::MAX;
 // The expressions in columns, by id. k holds the kind (0, a leaf: any
@@ -213,6 +260,9 @@ pub struct Pk {
     // per declaration: its kind, the number of names it declares, those
     // names (dense name ids)
     pub dmeta: Vec<u32>,
+    // the writer's segments after the first, and the next one's start
+    pub segs: Vec<SegStart>,
+    seg_b: u64,
     // a declaration being built
     draw: Vec<u8>,
     dpieces: Vec<u8>,
@@ -261,6 +311,8 @@ impl Pk {
             worker: false,
             fl: false,
             dmeta: Vec::new(),
+            segs: Vec::new(),
+            seg_b: SEG,
             draw: Vec::new(),
             dpieces: Vec::new(),
             dnames: Vec::new(),
@@ -319,8 +371,23 @@ impl Pk {
     #[inline(always)]
     fn flush_run(&mut self) {
         if self.run > 0 {
+            let p0 = self.stream.len();
             self.stream.push(20);
             wv(&mut self.stream, self.run as u64);
+            if !self.worker {
+                let k = self.run as u64;
+                note_segs(
+                    &mut self.segs,
+                    &mut self.seg_b,
+                    p0,
+                    self.stream.len(),
+                    self.exprs as u64 - k,
+                    k,
+                    self.names,
+                    self.levels,
+                    self.decls,
+                );
+            }
             self.run = 0;
         }
     }

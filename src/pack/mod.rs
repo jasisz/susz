@@ -191,7 +191,7 @@ impl fmt::Display for Stats {
 pub fn pack_to_vec(input: &str, opts: &Options) -> R<(Vec<u8>, Stats)> {
     let (pk, parallel) = read(input, opts)?;
     let mut out = Vec::new();
-    let mut st = write::write(pk, &mut out, opts.index)?;
+    let mut st = write::write(pk, &mut out, opts.index, opts.threads)?;
     st.parallel = parallel;
     Ok((out, st))
 }
@@ -206,7 +206,7 @@ pub fn pack_file(input: &str, output: &str, opts: &Options) -> R<Stats> {
     let res = (|| {
         let f = std::fs::File::create(&tmp).map_err(|e| cant!("cannot write {tmp}: {e}"))?;
         let mut w = std::io::BufWriter::with_capacity(1 << 20, f);
-        let mut st = write::write(pk, &mut w, opts.index)?;
+        let mut st = write::write(pk, &mut w, opts.index, opts.threads)?;
         use std::io::Write;
         w.flush().map_err(|e| cant!("cannot write {tmp}: {e}"))?;
         // complete for every other process once renamed; no fsync (on macOS a
