@@ -10,12 +10,12 @@
 // declarations, names made canonical.
 
 use super::lines::{Reader, PAD};
-use super::pk::{rv, Pk, FLAG, MAIN, NONE};
+use super::pk::{note_segs, rv, Pk, FLAG, MAIN, NONE, SEG};
 use super::{cant, R};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 
-struct SendPtr(*mut u8, *mut u32, *mut u32);
+struct SendPtr(*mut u8, *mut u32, *mut u32, *mut u32);
 unsafe impl Send for SendPtr {}
 unsafe impl Sync for SendPtr {}
 
@@ -127,7 +127,14 @@ pub fn parse_parallel(path: &str, threads: usize) -> R<Option<Pk>> {
     let mut ck: Vec<u8> = Vec::with_capacity(cap);
     let mut ca: Vec<u32> = Vec::with_capacity(cap);
     let mut cb: Vec<u32> = Vec::with_capacity(cap);
-    let colp = SendPtr(ck.as_mut_ptr(), ca.as_mut_ptr(), cb.as_mut_ptr());
+    // the owners too, each worker filling its own expressions' slots
+    let mut owner: Vec<u32> = Vec::with_capacity(cap);
+    let colp = SendPtr(
+        ck.as_mut_ptr(),
+        ca.as_mut_ptr(),
+        cb.as_mut_ptr(),
+        owner.as_mut_ptr(),
+    );
     let colp = &colp;
     let results: Vec<R<Pk>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..threads)
@@ -139,7 +146,16 @@ pub fn parse_parallel(path: &str, threads: usize) -> R<Option<Pk>> {
                     w.ap = colp.1;
                     w.bp = colp.2;
                     w.colcap = cap as u64;
-                    parse_range(path, from, to, &mut w).map(|_| w)
+                    parse_range(path, from, to, &mut w)?;
+                    if !w.er.floating {
+                        let (a, b) = (w.er.first as usize, w.exprs as usize);
+                        if a <= b && b <= cap {
+                            unsafe {
+                                std::slice::from_raw_parts_mut(colp.3.add(a), b - a).fill(NONE);
+                            }
+                        }
+                    }
+                    Ok(w)
                 })
             })
             .collect();
@@ -212,13 +228,19 @@ pub fn parse_parallel(path: &str, threads: usize) -> R<Option<Pk>> {
     pk.stream = stream;
     pk.decls = decls;
     // owners seeded and names made canonical, in file order
-    let mut owner = vec![NONE; n];
+    // every slot below n was filled by the worker whose range it is in
+    unsafe { owner.set_len(n) };
     let mut canon: Vec<u32> = Vec::with_capacity(nn as usize);
+    pk.cn = crate::canon::Canon::with_capacity(nn as usize);
     canon.push(0);
     let s = &pk.stream;
     let mut p = 0usize;
     let mut di = 0u32;
+    // the writer's segments: ids of the next name and level, expressions so far
+    let (mut name_id, mut level_id, mut e) = (1u32, 1u32, 0u64);
+    let (mut segs, mut seg_b) = (Vec::new(), SEG);
     while p < s.len() {
+        let p0 = p;
         let tag = s[p];
         p += 1;
         match tag {
@@ -228,22 +250,28 @@ pub fn parse_parallel(path: &str, threads: usize) -> R<Option<Pk>> {
                 let c = pk.cn.str_id(s, canon[pre], p as u64, l as u32);
                 canon.push(c);
                 p += l;
+                name_id += 1;
             }
             2 => {
                 let pre = rv(s, &mut p) as usize;
                 let k = rv(s, &mut p);
                 let c = pk.cn.num_id(canon[pre], k);
                 canon.push(c);
+                name_id += 1;
             }
             3 | 6 => {
                 rv(s, &mut p);
+                level_id += 1;
             }
             4 | 5 => {
                 rv(s, &mut p);
                 rv(s, &mut p);
+                level_id += 1;
             }
             20 => {
-                rv(s, &mut p);
+                let k = rv(s, &mut p);
+                note_segs(&mut segs, &mut seg_b, p0, p, e, k, name_id, level_id, di);
+                e += k;
             }
             18 => {
                 p += 1;
@@ -275,6 +303,7 @@ pub fn parse_parallel(path: &str, threads: usize) -> R<Option<Pk>> {
         }
     }
     pk.owner = owner;
+    pk.segs = segs;
     pk.canon = canon;
     pk.dmeta = dmeta;
     Ok(Some(pk))

@@ -9,6 +9,7 @@ const USAGE: &str = "usage:
   susz verify FILE.susz [--index]
   susz unpack FILE.susz OUT.ndjson
 
+pack uses all cores unless --threads N is given; the output is the same.
 pack exits 0 when OUT is written, 1 when IN is not a valid export,
 2 when it cannot be packed (a limit, an unknown record or field, I/O,
 an internal error). verify exits 0 accepted, 1 rejected (the file is
@@ -71,7 +72,11 @@ fn usage() -> ! {
 }
 
 fn cmd_pack(args: &[String]) {
-    let mut opts = Options::default();
+    // all cores unless --threads says otherwise
+    let mut opts = Options {
+        threads: pack::all_cores(),
+        ..Options::default()
+    };
     let mut files = Vec::new();
     let mut i = 0;
     while i < args.len() {

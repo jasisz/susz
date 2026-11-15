@@ -55,15 +55,14 @@ fn digits8(b: &[u8], p: usize) -> (u64, usize) {
     let w = ld8(b, p);
     let d = w ^ 0x3030_3030_3030_3030;
     let nd = (d.wrapping_add(0x7676_7676_7676_7676) | d) & 0x8080_8080_8080_8080;
-    let len = if nd == 0 {
-        8
-    } else {
-        (nd.trailing_zeros() / 8) as usize
-    };
-    if len == 0 {
+    // bits below the first non-digit (all 64 when there is none: 8 digits)
+    let bits = nd.trailing_zeros() & !7;
+    if bits == 0 {
         return (0, 0);
     }
-    let mut x = d << (64 - 8 * len as u32);
+    let len = (bits / 8) as usize;
+    // the digits to the top (a shift by 64 - bits, which is 0 for 8 digits)
+    let mut x = d.wrapping_shl(bits.wrapping_neg());
     x = (x.wrapping_mul(10) + (x >> 8)) & 0x00FF_00FF_00FF_00FF;
     x = (x.wrapping_mul(100) + (x >> 16)) & 0x0000_FFFF_0000_FFFF;
     x = (x.wrapping_mul(10000) + (x >> 32)) & 0xFFFF_FFFF;
@@ -74,10 +73,18 @@ fn digits8(b: &[u8], p: usize) -> (u64, usize) {
 // no digit or it is longer than 19 digits (left to the slow path).
 #[inline(always)]
 fn num(b: &[u8], p: usize) -> Option<(u64, usize)> {
-    let (v, n) = digits8(b, p);
-    if n == 0 {
+    // digits8, with its no-digit case returning None at once
+    let d = ld8(b, p) ^ 0x3030_3030_3030_3030;
+    let nd = (d.wrapping_add(0x7676_7676_7676_7676) | d) & 0x8080_8080_8080_8080;
+    let bits = nd.trailing_zeros() & !7;
+    if bits == 0 {
         return None;
     }
+    let n = (bits / 8) as usize;
+    let mut v = d.wrapping_shl(bits.wrapping_neg());
+    v = (v.wrapping_mul(10) + (v >> 8)) & 0x00FF_00FF_00FF_00FF;
+    v = (v.wrapping_mul(100) + (v >> 16)) & 0x0000_FFFF_0000_FFFF;
+    v = (v.wrapping_mul(10000) + (v >> 32)) & 0xFFFF_FFFF;
     if n < 8 {
         return Some((v, p + n));
     }
@@ -181,9 +188,91 @@ fn binder(b: &[u8], p: usize) -> Option<(u32, usize)> {
     }
 }
 
+// The next id in decimal, to compare with a line's id instead of parsing it,
+// while it has at most 8 digits: its ASCII digits (the first in the lowest
+// byte), their mask, 1 in the last digit's byte, how many (0 for a longer
+// id), the last digit.
+#[derive(Clone, Copy)]
+struct Dg {
+    w: u64,
+    mask: u64,
+    one: u64,
+    len: usize,
+    last: u8,
+}
+
+impl Dg {
+    #[inline(never)]
+    fn of(e: u64) -> Dg {
+        if e >= 100_000_000 {
+            return Dg {
+                w: 0,
+                mask: 0,
+                one: 0,
+                len: 0,
+                last: 0,
+            };
+        }
+        let mut len = 1;
+        while len < 8 && e >= POW10[len] {
+            len += 1;
+        }
+        let mut w = 0u64;
+        let mut x = e;
+        for i in (0..len).rev() {
+            w |= (b'0' as u64 + x % 10) << (8 * i);
+            x /= 10;
+        }
+        Dg {
+            w,
+            mask: if len == 8 {
+                !0
+            } else {
+                (1u64 << (8 * len)) - 1
+            },
+            one: 1u64 << (8 * (len - 1)),
+            len,
+            last: (e % 10) as u8,
+        }
+    }
+    // The id at p, which must be e: where it ends (a non-digit must follow,
+    // which the caller checks).
+    #[inline(always)]
+    fn id(&self, b: &[u8], p: usize, e: u64) -> Option<usize> {
+        if self.len != 0 {
+            if ld8(b, p) & self.mask != self.w {
+                return None;
+            }
+            Some(p + self.len)
+        } else {
+            let (ie, q) = num(b, p)?;
+            if ie != e {
+                return None;
+            }
+            Some(q)
+        }
+    }
+    // to the next id, e
+    #[inline(always)]
+    fn step(&mut self, e: u64) {
+        if self.len != 0 {
+            if self.last < 9 {
+                self.w += self.one;
+                self.last += 1;
+            } else if self.len >= 2 && (self.w >> (8 * (self.len - 2))) as u8 != b'9' {
+                // ..x9 to ..(x+1)0
+                self.w = self.w - 9 * self.one + (self.one >> 8);
+                self.last = 0;
+            } else {
+                *self = Dg::of(e);
+            }
+        }
+    }
+}
+
 // Application lines {"app":{"arg":A,"fn":F},"ie":I} from p while I is the
 // next id e: (where it stopped, the next id).
-#[inline(never)]
+#[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn app_run(
     b: &[u8],
@@ -194,7 +283,8 @@ fn app_run(
     kp: *mut u8,
     ap: *mut u32,
     bp: *mut u32,
-) -> (usize, u64) {
+    mut dg: Dg,
+) -> (usize, u64, Dg) {
     const APP0: u64 = word(b"{\"app\":{", 0, 8);
     const APP1: u64 = word(b":{\"arg\":", 0, 8);
     while p < lim && e < ecap {
@@ -209,13 +299,13 @@ fn app_run(
         if !lit(b, q2, b"},\"ie\":") {
             break;
         }
-        let Some((ie, q3)) = num(b, q2 + 7) else {
+        let Some(q3) = dg.id(b, q2 + 7, e) else {
             break;
         };
         if !lit(b, q3, b"}\n") {
             break;
         }
-        if ie != e || f >= e || a >= e {
+        if f >= e || a >= e {
             break;
         }
         unsafe {
@@ -225,8 +315,9 @@ fn app_run(
         }
         e += 1;
         p = q3 + 2;
+        dg.step(e);
     }
-    (p, e)
+    (p, e, dg)
 }
 
 // Runs of application, lambda and pi lines in their canonical forms while
@@ -252,14 +343,16 @@ pub fn col_run(pk: &mut Pk, b: &[u8], mut p: usize, lim: usize) -> (usize, u64) 
     const APP0: u64 = word(b"{\"app\":{", 0, 8);
     const FA0: u64 = word(b"{\"forall", 0, 8);
     const IE: u64 = word(b"{\"ie\":\0\0", 0, 8);
+    let mut dg = Dg::of(e);
     loop {
         if p >= lim || e >= ecap {
             break;
         }
         let w = ld8(b, p);
-        let (k, x, y, i, q);
+        let (k, x, y, q);
         if w == APP0 {
-            let (q, ne) = app_run(b, p, lim, e, ecap, kp, ap, bp);
+            let (q, ne, d2) = app_run(b, p, lim, e, ecap, kp, ap, bp, dg);
+            dg = d2;
             if ne == e {
                 break;
             }
@@ -279,7 +372,7 @@ pub fn col_run(pk: &mut Pk, b: &[u8], mut p: usize, lim: usize) -> (usize, u64) 
             if !lit(b, q2, b",\"ie\":") {
                 break;
             }
-            let Some((ie, q3)) = num(b, q2 + 6) else {
+            let Some(q3) = dg.id(b, q2 + 6, e) else {
                 break;
             };
             if !lit(b, q3, b"}\n") {
@@ -292,10 +385,9 @@ pub fn col_run(pk: &mut Pk, b: &[u8], mut p: usize, lim: usize) -> (usize, u64) 
             k = ((n as u32) << 4) | (6 + bi);
             x = t;
             y = body;
-            i = ie;
             q = q3 + 2;
         } else if w & 0xFFFF_FFFF_FFFF == IE {
-            let Some((ie, q1)) = num(b, p + 6) else { break };
+            let Some(q1) = dg.id(b, p + 6, e) else { break };
             if !lit(b, q1, b",\"lam\":{\"binderInfo\":\"") {
                 break;
             }
@@ -315,12 +407,11 @@ pub fn col_run(pk: &mut Pk, b: &[u8], mut p: usize, lim: usize) -> (usize, u64) 
             k = ((n as u32) << 4) | (2 + bi);
             x = t;
             y = body;
-            i = ie;
             q = q3 + 2;
         } else {
             break;
         }
-        if i != e || x >= e || y >= e {
+        if x >= e || y >= e {
             break;
         }
         unsafe {
@@ -333,6 +424,7 @@ pub fn col_run(pk: &mut Pk, b: &[u8], mut p: usize, lim: usize) -> (usize, u64) 
             }
         }
         e += 1;
+        dg.step(e);
         p = q;
     }
     let cnt = e - e0;
