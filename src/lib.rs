@@ -7,6 +7,8 @@
 //!   full structural check, with located errors.
 //! - [`index`]: the INDEX section: lookups and their verification.
 //! - [`unpack`]: Susz 1 back to ndjson.
+//! - [`slice`]: a Susz file cut down to some declarations and what they
+//!   depend on.
 //! - `mmap` (cargo feature `mmap`): `open_mmap`, a file's bytes through a
 //!   memory map.
 //!
@@ -21,6 +23,7 @@ pub mod index;
 pub mod mmap;
 pub mod pack;
 pub mod read;
+pub mod slice;
 pub mod unpack;
 #[doc(hidden)]
 pub mod vectors;

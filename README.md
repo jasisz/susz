@@ -44,6 +44,7 @@ Or the latest from this repository: `cargo install --git https://github.com/jasi
 susz pack IN.ndjson OUT.susz [--no-index] [--threads N]
 susz verify FILE.susz [--index]
 susz unpack FILE.susz OUT.ndjson
+susz slice IN.susz OUT.susz [--root NAME]... [--roots-file FILE] [--prefix NS]... [--no-index] [--threads N]
 ```
 
 `pack` converts an export. It uses all cores unless `--threads N` says how
@@ -89,6 +90,37 @@ export itself: a theorem whose proof names a constant declared after it.
 bytes. `mdata` and `letE`'s `nondep` flag are dropped on the way in, so they
 don't come back.
 
+`slice` writes a Susz file that holds only some declarations and everything
+they depend on, in their original order: to check one heavy declaration of a
+huge file on a small machine, say. The roots are named with `--root`
+(repeatable), one per line in `--roots-file`, or by `--prefix NS`, which
+takes every declaration whose dotted name starts with the string `NS`
+(`--prefix ""` takes them all). Names are written as `verify` prints them. A
+declaration depends on the constants and projections in its type, its value
+or its proof block, on its mutual block (`all`), and an inductive block comes
+whole, with its constructors and recursors. Two dependencies come from the
+kernel, not the terms (spec A.9): a Nat literal brings `Nat`, a string
+literal `String`, `Char`, `List` and their constructors, and any quotient
+declaration brings all four. The output is the canonical file of the export
+that keeps only those records, so `slice --prefix ""` of a canonical file
+gives back its bytes, and slicing a slice by the same roots changes nothing.
+The roots keep their proofs and values, and so does every other declaration
+kept.
+
+`slice` maps or reads the input (`--features mmap` maps it) and reads MAIN
+three times; PROOFS only for the proof blocks it keeps. It never holds the
+whole file's terms. What it does hold for the whole input, besides what any
+reader keeps (canonical names, about 40 bytes a name; frontier tables, 4
+bytes an entry; 48 bytes a proof block): 9 bytes a MAIN expression (its
+children, or the name of a constant), 8 bytes a reference from a
+declaration to an expression or a name, and a bit for each name, level, MAIN
+expression and declaration. The output is then built like `pack` builds it,
+so that part grows with the slice. On FLT (4.1 GB, 209 M MAIN expressions,
+12 M names, 1.7 M declarations), on the M2 Pro: `fermatLastTheoremThree`
+(66 k declarations, 8.9 M expressions kept) takes 11.7 s and a 3.5 GB peak
+footprint; `--prefix FreyPackage` (1.0 M declarations, 656 M expressions
+kept, a 3.6 GB output) takes 86 s and 12.1 GB.
+
 ## Exit codes
 
 | command | 0 | 1 | 2 |
@@ -96,6 +128,7 @@ don't come back.
 | `pack` | written | the input is not a valid export (bad JSON, an id that is missing or used twice, a cut-off line, a name declared twice, a declaration of the anonymous name) | couldn't pack it (a limit, something this version doesn't know, I/O, a bug) |
 | `verify` | fine | malformed, or a declaration fails | needs a newer reader, past a limit, or unreadable |
 | `unpack` | written | broken | needs a newer reader, or I/O |
+| `slice` | written | the input is rejected, a root names no declaration, or no declaration matches | needs a newer reader, I/O, a limit, or a bug |
 
 A panic counts as a bug: exit 2, and the partial output is removed.
 
