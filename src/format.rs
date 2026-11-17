@@ -125,6 +125,16 @@ pub fn get_varint(b: &[u8], p: &mut usize, end: usize) -> Result<u64, VarintErro
 /// The minimal little-endian bytes of a natural number written in decimal.
 /// `None` when `digits` is empty or holds a non-digit.
 pub fn nat_from_decimal(digits: &[u8]) -> Option<Vec<u8>> {
+    #[cfg(feature = "fast-nat")]
+    if digits.len() > 19 {
+        return fast_nat::from_decimal(digits);
+    }
+    nat_from_decimal_schoolbook(digits)
+}
+
+/// [`nat_from_decimal`] digit by digit: quadratic, used without `fast-nat`
+/// and for short literals.
+fn nat_from_decimal_schoolbook(digits: &[u8]) -> Option<Vec<u8>> {
     if digits.is_empty() || !digits.iter().all(|c| c.is_ascii_digit()) {
         return None;
     }
@@ -178,6 +188,16 @@ pub fn nat_from_decimal(digits: &[u8]) -> Option<Vec<u8>> {
 
 /// The decimal form of a natural number given as little-endian bytes.
 pub fn nat_to_decimal(bytes: &[u8]) -> String {
+    #[cfg(feature = "fast-nat")]
+    if bytes.len() > 8 {
+        return fast_nat::to_decimal(bytes);
+    }
+    nat_to_decimal_schoolbook(bytes)
+}
+
+/// [`nat_to_decimal`] one limb at a time: quadratic, used without `fast-nat`
+/// and for short literals.
+fn nat_to_decimal_schoolbook(bytes: &[u8]) -> String {
     let mut limbs: Vec<u32> = bytes
         .chunks(4)
         .map(|c| {
@@ -212,8 +232,91 @@ pub fn nat_to_decimal(bytes: &[u8]) -> String {
     s
 }
 
+#[cfg(feature = "fast-nat")]
+mod fast_nat {
+    use malachite_nz::natural::Natural;
+
+    pub(super) fn from_decimal(digits: &[u8]) -> Option<Vec<u8>> {
+        if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        let n: Natural = core::str::from_utf8(digits).ok()?.parse().ok()?;
+        let mut out: Vec<u8> = n
+            .to_limbs_asc()
+            .iter()
+            .flat_map(|l| l.to_le_bytes())
+            .collect();
+        while out.last() == Some(&0) {
+            out.pop();
+        }
+        Some(out)
+    }
+
+    pub(super) fn to_decimal(bytes: &[u8]) -> String {
+        let limbs: Vec<u64> = bytes
+            .chunks(8)
+            .map(|c| {
+                let mut t = [0u8; 8];
+                t[..c.len()].copy_from_slice(c);
+                u64::from_le_bytes(t)
+            })
+            .collect();
+        Natural::from_limbs_asc(&limbs).to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn nat_conversions_agree_with_schoolbook() {
+        let mut x = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut cases: Vec<String> = [
+            "0",
+            "1",
+            "000123",
+            "18446744073709551615",
+            "18446744073709551616",
+            "99999999999999999999",
+        ]
+        .iter()
+        .map(|d| d.to_string())
+        .collect();
+        for n in [20, 40, 400, 5000] {
+            cases.push(
+                (0..n)
+                    .map(|_| char::from(b'0' + (next() % 10) as u8))
+                    .collect(),
+            );
+        }
+        for d in &cases {
+            let fast = nat_from_decimal(d.as_bytes()).unwrap();
+            assert_eq!(
+                fast,
+                nat_from_decimal_schoolbook(d.as_bytes()).unwrap(),
+                "{d}"
+            );
+            assert_eq!(
+                nat_to_decimal(&fast),
+                nat_to_decimal_schoolbook(&fast),
+                "{d}"
+            );
+            let canonical = match d.trim_start_matches('0') {
+                "" => "0",
+                t => t,
+            };
+            assert_eq!(nat_to_decimal(&fast), canonical, "{d}");
+        }
+        assert_eq!(nat_from_decimal(b""), None);
+        assert_eq!(nat_from_decimal(b"123456789012345678901x"), None);
+    }
+
     use super::*;
 
     fn rt(v: u64) {
