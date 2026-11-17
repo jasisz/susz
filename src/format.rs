@@ -125,15 +125,14 @@ pub fn get_varint(b: &[u8], p: &mut usize, end: usize) -> Result<u64, VarintErro
 /// The minimal little-endian bytes of a natural number written in decimal.
 /// `None` when `digits` is empty or holds a non-digit.
 pub fn nat_from_decimal(digits: &[u8]) -> Option<Vec<u8>> {
-    #[cfg(feature = "fast-nat")]
     if digits.len() > 19 {
         return fast_nat::from_decimal(digits);
     }
     nat_from_decimal_schoolbook(digits)
 }
 
-/// [`nat_from_decimal`] digit by digit: quadratic, used without `fast-nat`
-/// and for short literals.
+/// [`nat_from_decimal`] digit by digit, for literals of up to 19 digits (and
+/// the tests' reference).
 fn nat_from_decimal_schoolbook(digits: &[u8]) -> Option<Vec<u8>> {
     if digits.is_empty() || !digits.iter().all(|c| c.is_ascii_digit()) {
         return None;
@@ -188,15 +187,14 @@ fn nat_from_decimal_schoolbook(digits: &[u8]) -> Option<Vec<u8>> {
 
 /// The decimal form of a natural number given as little-endian bytes.
 pub fn nat_to_decimal(bytes: &[u8]) -> String {
-    #[cfg(feature = "fast-nat")]
     if bytes.len() > 8 {
         return fast_nat::to_decimal(bytes);
     }
     nat_to_decimal_schoolbook(bytes)
 }
 
-/// [`nat_to_decimal`] one limb at a time: quadratic, used without `fast-nat`
-/// and for short literals.
+/// [`nat_to_decimal`] one limb at a time, for literals of up to 8 bytes (and
+/// the tests' reference).
 fn nat_to_decimal_schoolbook(bytes: &[u8]) -> String {
     let mut limbs: Vec<u32> = bytes
         .chunks(4)
@@ -232,7 +230,7 @@ fn nat_to_decimal_schoolbook(bytes: &[u8]) -> String {
     s
 }
 
-#[cfg(feature = "fast-nat")]
+/// Divide and conquer (malachite) for literals past a machine word.
 mod fast_nat {
     use malachite_nz::natural::Natural;
 
