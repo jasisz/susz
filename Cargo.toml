@@ -9,11 +9,14 @@ readme = "README.md"
 keywords = ["lean", "lean4", "kernel", "export", "binary-format"]
 categories = ["encoding", "parser-implementations", "mathematics", "command-line-utilities"]
 exclude = [".github/"]
-rust-version = "1.80"
+rust-version = "1.85"
 
 [dependencies]
-# Only with the `mmap` feature (off by default): the library itself has no
-# dependencies.
+# Nat literals converted between decimal and binary by divide and conquer
+# instead of digit by digit, which is quadratic: some exports (CFSG's
+# certificates) hold literals of millions of digits.
+malachite-nz = "0.6"
+# Only with the `mmap` feature (off by default).
 memmap2 = { version = "0.9.10", optional = true }
 
 [features]
