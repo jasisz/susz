@@ -202,3 +202,114 @@ fn truncated_mapped_input_exits_2_and_removes_output() {
     assert!(err.contains("truncated or could not be read"), "{err}");
     assert!(!out.exists());
 }
+
+// Axioms A, B and U, a theorem T : A := B, and C : A a definition whose
+// type is A, so its value is never looked at: T uses A and B, nothing uses U.
+const AXIOMS: &str = "{\"meta\":{\"format\":{\"version\":\"3.1.0\"}}}\n\
+{\"in\":1,\"str\":{\"pre\":0,\"str\":\"A\"}}\n\
+{\"in\":2,\"str\":{\"pre\":0,\"str\":\"B\"}}\n\
+{\"in\":3,\"str\":{\"pre\":0,\"str\":\"T\"}}\n\
+{\"in\":4,\"str\":{\"pre\":0,\"str\":\"U\"}}\n\
+{\"in\":5,\"str\":{\"pre\":4,\"str\":\"x\"}}\n\
+{\"ie\":0,\"sort\":0}\n\
+{\"const\":{\"name\":1,\"us\":[]},\"ie\":1}\n\
+{\"const\":{\"name\":2,\"us\":[]},\"ie\":2}\n\
+{\"axiom\":{\"isUnsafe\":false,\"levelParams\":[],\"name\":1,\"type\":0}}\n\
+{\"axiom\":{\"isUnsafe\":false,\"levelParams\":[],\"name\":2,\"type\":1}}\n\
+{\"axiom\":{\"isUnsafe\":false,\"levelParams\":[],\"name\":5,\"type\":0}}\n\
+{\"thm\":{\"all\":[3],\"levelParams\":[],\"name\":3,\"type\":1,\"value\":2}}\n\
+{\"axiom\":{\"isUnsafe\":false,\"levelParams\":[],\"name\":4,\"type\":0}}\n";
+
+fn axioms(file: &Path, args: &[&str]) -> (i32, String, String) {
+    let st = bin().arg("axioms").arg(file).args(args).output().unwrap();
+    (
+        st.status.code().unwrap_or(-1),
+        String::from_utf8(st.stdout).unwrap(),
+        String::from_utf8_lossy(&st.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn axioms_used_and_unused() {
+    let (c, f) = pack("axioms", AXIOMS);
+    assert_eq!(c, 0);
+    // a theorem: the axioms of its type and its proof, sorted
+    let (c, out, err) = axioms(&f, &["--root", "T"]);
+    assert_eq!(c, 0, "{err}");
+    assert_eq!(out, "A\nB\n");
+    // an axiom as a root is its own dependency
+    let (c, out, _) = axioms(&f, &["--root", "U", "--quiet"]);
+    assert_eq!(c, 0);
+    assert_eq!(out, "U\n");
+    // an axiom of an axiom's type
+    let (c, out, _) = axioms(&f, &["--root", "B", "--threads", "2"]);
+    assert_eq!(c, 0);
+    assert_eq!(out, "A\nB\n");
+    // no root: every axiom of the file
+    let (c, out, _) = axioms(&f, &[]);
+    assert_eq!(c, 0);
+    assert_eq!(out, "A\nB\nU\nU.x\n");
+    // by prefix, and from a roots file
+    let (c, out, _) = axioms(&f, &["--prefix", "U."]);
+    assert_eq!(c, 0);
+    assert_eq!(out, "U.x\n");
+    let roots = tmp("axioms.roots");
+    std::fs::write(&roots, "T\n\nU.x\n").unwrap();
+    let (c, out, _) = axioms(&f, &["--roots-file", roots.to_str().unwrap()]);
+    assert_eq!(c, 0);
+    assert_eq!(out, "A\nB\nU.x\n");
+    // nothing written next to the input
+    let dir = f.parent().unwrap();
+    for e in std::fs::read_dir(dir).unwrap() {
+        let n = e.unwrap().file_name().to_string_lossy().to_string();
+        assert!(!n.starts_with("cli-axioms.susz."), "{n} written");
+    }
+}
+
+#[test]
+fn axioms_all() {
+    let (c, f) = pack("axioms-all", AXIOMS);
+    assert_eq!(c, 0);
+    let (c, out, err) = axioms(&f, &["--root", "T", "--all"]);
+    assert_eq!(c, 0, "{err}");
+    assert_eq!(out, "used A\nused B\nunused U\nunused U.x\n");
+    let (c, out, _) = axioms(&f, &["--all"]);
+    assert_eq!(c, 0);
+    assert_eq!(out, "used A\nused B\nused U\nused U.x\n");
+    // a theorem without axioms: nothing used, still listed
+    let (c, f) = pack("axioms-none", GOOD);
+    assert_eq!(c, 0);
+    let (c, out, _) = axioms(&f, &["--all"]);
+    assert_eq!(c, 0);
+    assert_eq!(out, "used A\n");
+}
+
+#[test]
+fn axioms_exit_codes() {
+    let (c, f) = pack("axioms-codes", AXIOMS);
+    assert_eq!(c, 0);
+    // a missing root: exit 1, nothing on stdout
+    let (c, out, err) = axioms(&f, &["--root", "T", "--root", "No.Such"]);
+    assert_eq!(c, 1);
+    assert_eq!(out, "");
+    assert!(err.contains("no declaration named No.Such"), "{err}");
+    let (c, out, _) = axioms(&f, &["--prefix", "No.Such"]);
+    assert_eq!(c, 1);
+    assert_eq!(out, "");
+    let v = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
+    for (file, code) in [
+        ("accept/blocks.susz", 0),
+        ("reject/back-distance-past-start.susz", 1),
+        ("decline/major-2.susz", 2),
+    ] {
+        let (c, _, err) = axioms(&v.join(file), &[]);
+        assert_eq!(c, code, "{file}: {err}");
+    }
+    let (c, _, _) = axioms(&tmp("does-not-exist.susz"), &[]);
+    assert_eq!(c, 2);
+    // no file, two files, an unknown option
+    for args in [&[][..], &["x.susz", "y.susz"], &["x.susz", "--nope"]] {
+        let st = bin().arg("axioms").args(args).output().unwrap();
+        assert_eq!(st.status.code(), Some(2), "{args:?}");
+    }
+}

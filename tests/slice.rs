@@ -261,3 +261,46 @@ fn slices_of_init() {
         check_slice(&b, roots, &roots.join(","));
     }
 }
+
+// axioms lists the axioms of the slice by the same roots: the closure is
+// shared.
+#[test]
+fn axioms_are_those_of_the_slice() {
+    use susz::axioms::{axioms, AxiomsOptions};
+    let Some(b) = init_prelude() else { return };
+    let ax = |b: &[u8], roots: &[&str]| {
+        axioms(
+            b,
+            &AxiomsOptions {
+                roots: roots.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let every = ax(&b, &[]);
+    assert!(every.unused.is_empty());
+    assert_eq!(every.used, ["Classical.choice", "Quot.sound", "sorryAx"]);
+    // funext is proved with the quotient
+    assert_eq!(ax(&b, &["funext"]).used, ["Quot.sound"]);
+    let mut some_unused = false;
+    for roots in [
+        &["Nat.add"][..],
+        &["Nat.le_refl"],
+        &["Quot.lift"],
+        &["Nat.decEq"],
+        &["funext"],
+        &["Classical.choice", "Nat.add"],
+        &["Lean.Macro.throwUnsupported", "Nat.add"],
+    ] {
+        let a = ax(&b, roots);
+        let (out, _) = slice_to_vec(&b, &opts(roots, &[], false)).unwrap();
+        let of_slice = ax(&out, &[]);
+        assert_eq!(a.used, of_slice.used, "{roots:?}");
+        let mut both: Vec<String> = a.used.iter().chain(&a.unused).cloned().collect();
+        both.sort();
+        assert_eq!(both, every.used, "{roots:?}");
+        some_unused |= !a.unused.is_empty();
+    }
+    assert!(some_unused);
+}

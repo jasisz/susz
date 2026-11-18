@@ -9,13 +9,16 @@
 //! - [`unpack`]: Susz 1 back to ndjson.
 //! - [`slice`]: a Susz file cut down to some declarations and what they
 //!   depend on.
+//! - [`axioms`]: the axioms some declarations depend on.
 //! - `mmap` (cargo feature `mmap`): `open_mmap`, a file's bytes through a
 //!   memory map.
 //!
 //! The format is specified in `docs/spec.md`.
 
 pub mod asm;
+pub mod axioms;
 pub mod canon;
+mod closure;
 pub mod digest;
 pub mod format;
 pub mod index;
