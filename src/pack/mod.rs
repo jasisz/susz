@@ -8,7 +8,7 @@
 pub(crate) mod json;
 mod lines;
 mod par;
-mod pk;
+pub(crate) mod pk;
 mod write;
 
 use std::fmt;
@@ -208,12 +208,20 @@ pub fn pack_to_vec(input: &str, opts: &Options) -> R<(Vec<u8>, Stats)> {
 /// never holds a partial file.
 pub fn pack_file(input: &str, output: &str, opts: &Options) -> R<Stats> {
     let (pk, parallel) = read(input, opts)?;
+    let mut st = write_file(pk, output, opts)?;
+    st.parallel = parallel;
+    Ok(st)
+}
+
+// Writes what `pk` read to `output`, under a temporary name renamed when
+// complete (packing, slicing).
+pub(crate) fn write_file(pk: pk::Pk, output: &str, opts: &Options) -> R<Stats> {
     let tmp = format!("{output}.tmp-{}", std::process::id());
     crate::cleanup::register(&tmp);
     let res = (|| {
         let f = std::fs::File::create(&tmp).map_err(|e| cant!("cannot write {tmp}: {e}"))?;
         let mut w = std::io::BufWriter::with_capacity(1 << 20, f);
-        let mut st = write::write(pk, &mut w, opts.index, opts.threads)?;
+        let st = write::write(pk, &mut w, opts.index, opts.threads)?;
         use std::io::Write;
         w.flush().map_err(|e| cant!("cannot write {tmp}: {e}"))?;
         // complete for every other process once renamed; no fsync (on macOS a
@@ -223,7 +231,6 @@ pub fn pack_file(input: &str, output: &str, opts: &Options) -> R<Stats> {
             .map_err(|e| cant!("cannot write {tmp}: {e}"))?;
         drop(f);
         std::fs::rename(&tmp, output).map_err(|e| cant!("cannot rename {tmp} to {output}: {e}"))?;
-        st.parallel = parallel;
         Ok(st)
     })();
     if res.is_err() {
@@ -231,6 +238,13 @@ pub fn pack_file(input: &str, output: &str, opts: &Options) -> R<Stats> {
     }
     crate::cleanup::unregister();
     res
+}
+
+// Writes what `pk` read to bytes in memory (slicing, in tests).
+pub(crate) fn write_vec(pk: pk::Pk, opts: &Options) -> R<(Vec<u8>, Stats)> {
+    let mut out = Vec::new();
+    let st = write::write(pk, &mut out, opts.index, opts.threads)?;
+    Ok((out, st))
 }
 
 fn read(input: &str, opts: &Options) -> R<(pk::Pk, bool)> {

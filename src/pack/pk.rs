@@ -536,6 +536,18 @@ impl Pk {
         self.xbuf.extend_from_slice(&bytes);
         self.new_leaf(ie)
     }
+    // A Nat literal already in its Susz form: minimal little-endian bytes
+    // (slicing a Susz file; no decimal round trip for huge literals).
+    pub fn nat_le(&mut self, ie: u64, bytes: &[u8]) -> R<()> {
+        self.xstart(ie)?;
+        if bytes.last() == Some(&0) {
+            return Err(cant!("internal: a Nat literal that is not minimal"));
+        }
+        self.xbuf.push(14);
+        wv(&mut self.xbuf, bytes.len() as u64);
+        self.xbuf.extend_from_slice(bytes);
+        self.new_leaf(ie)
+    }
     pub fn strv(&mut self, ie: u64, s: &[u8]) -> R<()> {
         self.xstart(ie)?;
         self.xbuf.push(15);
@@ -916,7 +928,7 @@ impl Pk {
         self.dhead(name, &ps, ty)
     }
 
-    fn decl_obj(&mut self, k: &[u8], o: &[(Vec<u8>, J)]) -> R<()> {
+    pub(crate) fn decl_obj(&mut self, k: &[u8], o: &[(Vec<u8>, J)]) -> R<()> {
         self.check_decls()?;
         match k {
             b"axiom" => {

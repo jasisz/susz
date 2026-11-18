@@ -1,4 +1,4 @@
-// The `susz` command: pack, verify, unpack.
+// The `susz` command: pack, verify, unpack, slice.
 
 use std::process::exit;
 use susz::pack::{self, Fault, Options};
@@ -7,14 +7,23 @@ use susz::read::Outcome;
 const USAGE: &str = "usage:
   susz pack IN.ndjson OUT.susz [--no-index] [--threads N]
   susz verify FILE.susz [--index]
-  susz unpack FILE.susz OUT.ndjson
+  susz unpack FILE.susz OUT.ndjson|-
+  susz slice IN.susz OUT.susz [--root NAME]... [--roots-file FILE] [--prefix NS]...
+             [--no-index] [--threads N] [--quiet]
 
 pack uses all cores unless --threads N is given; the output is the same.
 pack exits 0 when OUT is written, 1 when IN is not a valid export,
 2 when it cannot be packed (a limit, an unknown record or field, I/O,
 an internal error). verify exits 0 accepted, 1 rejected (the file is
 malformed, or a declaration fails a rule a reader checks without types,
-such as rule P), 2 declined or unreadable. unpack exits 0 written, 1 rejected, 2 declined or I/O.";
+such as rule P), 2 declined or unreadable. unpack exits 0 written, 1 rejected, 2 declined or I/O.
+unpack to - writes the ndjson to stdout as it goes; on an error it stops,
+and what was already written stays written.
+
+slice keeps the named declarations (--root, or one name per line of
+--roots-file), every declaration whose name starts with a --prefix string,
+and everything they depend on, in their order. It exits 0 written,
+1 IN rejected or a root not found, 2 declined, I/O or an internal error.";
 
 extern "C" {
     fn _exit(code: i32) -> !;
@@ -34,6 +43,7 @@ fn main() {
         "pack" => cmd_pack(&args[1..]),
         "verify" => cmd_verify(&args[1..]),
         "unpack" => cmd_unpack(&args[1..]),
+        "slice" => cmd_slice(&args[1..]),
         "--version" | "-V" => println!(
             "susz {} (Susz {})",
             env!("CARGO_PKG_VERSION"),
@@ -270,6 +280,20 @@ fn cmd_unpack(args: &[String]) {
     }
     let bytes = read_file(&args[0]);
     let out = &args[1];
+    if out == "-" {
+        // to stdout, as it is produced: nothing to clean up on failure
+        let res = (|| -> Result<(), susz::unpack::UnpackError> {
+            let mut w = std::io::BufWriter::with_capacity(1 << 20, std::io::stdout().lock());
+            susz::unpack::unpack(&bytes, &mut w)?;
+            use std::io::Write;
+            w.flush()?;
+            Ok(())
+        })();
+        if let Err(e) = res {
+            unpack_failed(e);
+        }
+        return;
+    }
     let tmp = format!("{out}.tmp-{}", std::process::id());
     susz::cleanup::register(&tmp);
     sigbus::output(Some(&tmp));
@@ -287,11 +311,83 @@ fn cmd_unpack(args: &[String]) {
     susz::cleanup::unregister();
     if let Err(e) = res {
         let _ = std::fs::remove_file(&tmp);
-        eprintln!("susz: {e}");
-        let code = match &e {
-            susz::unpack::UnpackError::File(f) if !f.class.declines() => 1,
-            _ => 2,
-        };
-        exit(code);
+        unpack_failed(e);
+    }
+}
+
+fn unpack_failed(e: susz::unpack::UnpackError) -> ! {
+    eprintln!("susz: {e}");
+    let code = match &e {
+        susz::unpack::UnpackError::File(f) if !f.class.declines() => 1,
+        _ => 2,
+    };
+    exit(code)
+}
+
+fn cmd_slice(args: &[String]) {
+    let mut opts = susz::slice::SliceOptions {
+        index: true,
+        threads: 1,
+        progress: true,
+        ..Default::default()
+    };
+    let mut files = Vec::new();
+    let mut i = 0;
+    let value = |i: &mut usize| -> String {
+        *i += 1;
+        args.get(*i).cloned().unwrap_or_else(|| usage())
+    };
+    while i < args.len() {
+        match args[i].as_str() {
+            "--root" => opts.roots.push(value(&mut i)),
+            "--prefix" => opts.prefixes.push(value(&mut i)),
+            "--roots-file" => {
+                let p = value(&mut i);
+                let text = std::fs::read_to_string(&p).unwrap_or_else(|e| {
+                    eprintln!("susz: cannot read {p}: {e}");
+                    exit(2)
+                });
+                opts.roots.extend(
+                    text.lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .map(String::from),
+                );
+            }
+            "--no-index" => opts.index = false,
+            "--quiet" => opts.progress = false,
+            "--threads" => {
+                opts.threads = value(&mut i)
+                    .parse()
+                    .ok()
+                    .filter(|&n| n >= 1)
+                    .unwrap_or_else(|| usage())
+            }
+            a if a.starts_with('-') => usage(),
+            a => files.push(a.to_string()),
+        }
+        i += 1;
+    }
+    if files.len() != 2 {
+        usage();
+    }
+    let bytes = read_file(&files[0]);
+    let out = &files[1];
+    let tmp = format!("{out}.tmp-{}", std::process::id());
+    sigbus::output(Some(&tmp));
+    let res = susz::slice::slice_file(&bytes, out, &opts);
+    sigbus::output(None);
+    match res {
+        Ok(st) => eprintln!("{st}"),
+        Err(e) => {
+            use susz::slice::SliceError;
+            let code = match &e {
+                SliceError::File(f) if f.class.declines() => 2,
+                SliceError::File(_) | SliceError::NotFound(_) | SliceError::Empty => 1,
+                SliceError::Pack(_) => 2,
+            };
+            eprintln!("susz: {}: {e}", files[0]);
+            exit(code);
+        }
     }
 }
