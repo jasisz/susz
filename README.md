@@ -45,6 +45,7 @@ susz pack IN.ndjson OUT.susz [--no-index] [--threads N]
 susz verify FILE.susz [--index]
 susz unpack FILE.susz OUT.ndjson|-
 susz slice IN.susz OUT.susz [--root NAME]... [--roots-file FILE] [--prefix NS]... [--no-index] [--threads N]
+susz axioms FILE.susz [--root NAME]... [--roots-file FILE] [--prefix NS]... [--all] [--threads N]
 ```
 
 `pack` converts an export. It uses all cores unless `--threads N` says how
@@ -126,6 +127,30 @@ so that part grows with the slice. On FLT (4.1 GB, 209 M MAIN expressions,
 footprint; `--prefix FreyPackage` (1.0 M declarations, 656 M expressions
 kept, a 3.6 GB output) takes 86 s and 12.1 GB.
 
+`axioms` lists the axioms some declarations depend on, like Lean's
+`#print axioms`, without type-checking anything: the axiom declarations in
+the closure `slice` would keep for the same roots (`--root`, `--roots-file`,
+`--prefix`, and the same dependencies, proof blocks and kernel ones
+included), one dotted name per line, sorted, on stdout. With no root and no
+prefix it lists every axiom the file declares. `--all` lists every axiom the
+file declares, each after `used ` or `unused `. It writes no file, and reads
+what `slice` reads up to the closure. `--threads` is accepted as `slice`
+takes it and changes nothing. On CFSG (35 GB, 728 M MAIN expressions, 42 M
+declarations; mapped, on the M2 Pro: 150 s, 12.2 GB peak footprint, of
+which reading MAIN is 81 s and the closure, 40 M declarations and 1.25 G
+proof-block expressions, 68 s):
+
+```sh
+$ susz axioms cfsg.susz --root CFSGComparator.classification --all
+used Classical.choice
+used Quot.sound
+used propext
+unused sorryAx
+```
+
+The answer is about the dependency graph only: it says what the root rests
+on if every declaration on the way checks.
+
 ## Exit codes
 
 | command | 0 | 1 | 2 |
@@ -134,6 +159,7 @@ kept, a 3.6 GB output) takes 86 s and 12.1 GB.
 | `verify` | fine | malformed, or a declaration fails | needs a newer reader, past a limit, or unreadable |
 | `unpack` | written | broken | needs a newer reader, or I/O |
 | `slice` | written | the input is rejected, a root names no declaration, or no declaration matches | needs a newer reader, I/O, a limit, or a bug |
+| `axioms` | listed | the input is rejected, a root names no declaration, or no declaration matches | needs a newer reader, or unreadable |
 
 A panic counts as a bug: exit 2, and the partial output is removed.
 
@@ -222,7 +248,8 @@ The pieces underneath are public too: `susz::read::File::open` opens a file
 and checks its framing, `File::main()` walks the records, `susz::read::Block`
 reads one proof block, `susz::pack::pack_file` packs,
 `susz::unpack::unpack` writes ndjson to any `Write`, and
-`susz::slice::slice_file` slices.
+`susz::slice::slice_file` slices and `susz::axioms::axioms` lists the
+axioms of a closure.
 
 `susz::index::Lookup` finds declarations by name. It decodes the index once
 and keeps its place in MAIN between lookups. The binary search is the cheap

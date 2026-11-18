@@ -1,4 +1,4 @@
-// The `susz` command: pack, verify, unpack, slice.
+// The `susz` command: pack, verify, unpack, slice, axioms.
 
 use std::process::exit;
 use susz::pack::{self, Fault, Options};
@@ -10,6 +10,8 @@ const USAGE: &str = "usage:
   susz unpack FILE.susz OUT.ndjson|-
   susz slice IN.susz OUT.susz [--root NAME]... [--roots-file FILE] [--prefix NS]...
              [--no-index] [--threads N] [--quiet]
+  susz axioms FILE.susz [--root NAME]... [--roots-file FILE] [--prefix NS]...
+              [--all] [--threads N] [--quiet]
 
 pack uses all cores unless --threads N is given; the output is the same.
 pack exits 0 when OUT is written, 1 when IN is not a valid export,
@@ -23,7 +25,14 @@ and what was already written stays written.
 slice keeps the named declarations (--root, or one name per line of
 --roots-file), every declaration whose name starts with a --prefix string,
 and everything they depend on, in their order. It exits 0 written,
-1 IN rejected or a root not found, 2 declined, I/O or an internal error.";
+1 IN rejected or a root not found, 2 declined, I/O or an internal error.
+
+axioms prints, one per line and sorted, the axiom declarations in the
+closure slice would keep for the same roots; with no root or prefix, every
+axiom FILE declares. With --all it prints every axiom FILE declares, each
+after `used ` or `unused `. It writes no file; --threads is accepted as
+slice takes it and changes nothing. It exits 0 listed, 1 FILE rejected,
+a root not found or no declaration matched, 2 declined or unreadable.";
 
 extern "C" {
     fn _exit(code: i32) -> !;
@@ -44,6 +53,7 @@ fn main() {
         "verify" => cmd_verify(&args[1..]),
         "unpack" => cmd_unpack(&args[1..]),
         "slice" => cmd_slice(&args[1..]),
+        "axioms" => cmd_axioms(&args[1..]),
         "--version" | "-V" => println!(
             "susz {} (Susz {})",
             env!("CARGO_PKG_VERSION"),
@@ -385,6 +395,92 @@ fn cmd_slice(args: &[String]) {
                 SliceError::File(f) if f.class.declines() => 2,
                 SliceError::File(_) | SliceError::NotFound(_) | SliceError::Empty => 1,
                 SliceError::Pack(_) => 2,
+            };
+            eprintln!("susz: {}: {e}", files[0]);
+            exit(code);
+        }
+    }
+}
+
+fn cmd_axioms(args: &[String]) {
+    let mut opts = susz::axioms::AxiomsOptions {
+        progress: true,
+        ..Default::default()
+    };
+    let mut all = false;
+    let mut files = Vec::new();
+    let mut i = 0;
+    let value = |i: &mut usize| -> String {
+        *i += 1;
+        args.get(*i).cloned().unwrap_or_else(|| usage())
+    };
+    while i < args.len() {
+        match args[i].as_str() {
+            "--root" => opts.roots.push(value(&mut i)),
+            "--prefix" => opts.prefixes.push(value(&mut i)),
+            "--roots-file" => {
+                let p = value(&mut i);
+                let text = std::fs::read_to_string(&p).unwrap_or_else(|e| {
+                    eprintln!("susz: cannot read {p}: {e}");
+                    exit(2)
+                });
+                opts.roots.extend(
+                    text.lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .map(String::from),
+                );
+            }
+            "--all" => all = true,
+            "--quiet" => opts.progress = false,
+            // as slice takes it; the closure runs on one thread
+            "--threads" => {
+                value(&mut i)
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|&n| n >= 1)
+                    .unwrap_or_else(|| usage());
+            }
+            a if a.starts_with('-') => usage(),
+            a => files.push(a.to_string()),
+        }
+        i += 1;
+    }
+    if files.len() != 1 {
+        usage();
+    }
+    let bytes = read_file(&files[0]);
+    match susz::axioms::axioms(&bytes, &opts) {
+        Ok(ax) => {
+            use std::io::Write;
+            let mut w = std::io::BufWriter::new(std::io::stdout().lock());
+            let res = if all {
+                let mut xs: Vec<(&str, &str)> = ax
+                    .used
+                    .iter()
+                    .map(|n| (n.as_str(), "used"))
+                    .chain(ax.unused.iter().map(|n| (n.as_str(), "unused")))
+                    .collect();
+                xs.sort_unstable();
+                xs.iter()
+                    .try_for_each(|(n, m)| writeln!(w, "{m} {n}"))
+                    .and_then(|()| w.flush())
+            } else {
+                ax.used
+                    .iter()
+                    .try_for_each(|n| writeln!(w, "{n}"))
+                    .and_then(|()| w.flush())
+            };
+            if let Err(e) = res {
+                eprintln!("susz: cannot write the list: {e}");
+                exit(2);
+            }
+        }
+        Err(e) => {
+            use susz::axioms::AxiomsError;
+            let code = match &e {
+                AxiomsError::File(f) if f.class.declines() => 2,
+                AxiomsError::File(_) | AxiomsError::NotFound(_) | AxiomsError::Empty => 1,
             };
             eprintln!("susz: {}: {e}", files[0]);
             exit(code);
