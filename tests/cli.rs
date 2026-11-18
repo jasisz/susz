@@ -150,6 +150,31 @@ fn rule_p_is_a_declaration_failure() {
     );
 }
 
+// `unpack FILE -` writes to stdout the same bytes `unpack FILE OUT` writes to
+// OUT.
+#[test]
+fn unpack_to_stdout() {
+    let (c, out) = pack("stdout", GOOD);
+    assert_eq!(c, 0);
+    let nd = tmp("stdout.unpacked.ndjson");
+    let st = bin().arg("unpack").arg(&out).arg(&nd).output().unwrap();
+    assert_eq!(st.status.code(), Some(0));
+    let st = bin().arg("unpack").arg(&out).arg("-").output().unwrap();
+    assert_eq!(st.status.code(), Some(0));
+    assert!(!st.stdout.is_empty());
+    assert_eq!(st.stdout, std::fs::read(&nd).unwrap());
+    assert!(!Path::new("-").exists());
+
+    let v = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
+    for (f, code) in [
+        ("reject/back-distance-past-start.susz", 1),
+        ("decline/major-2.susz", 2),
+    ] {
+        let st = bin().arg("unpack").arg(v.join(f)).arg("-").output().unwrap();
+        assert_eq!(st.status.code(), Some(code), "{f}");
+    }
+}
+
 // A declaration of the anonymous name cannot be written: exit 1.
 #[test]
 fn anonymous_declaration_is_refused() {

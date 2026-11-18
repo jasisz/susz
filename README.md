@@ -43,7 +43,7 @@ Or the latest from this repository: `cargo install --git https://github.com/jasi
 ```sh
 susz pack IN.ndjson OUT.susz [--no-index] [--threads N]
 susz verify FILE.susz [--index]
-susz unpack FILE.susz OUT.ndjson
+susz unpack FILE.susz OUT.ndjson|-
 susz slice IN.susz OUT.susz [--root NAME]... [--roots-file FILE] [--prefix NS]... [--no-index] [--threads N]
 ```
 
@@ -88,7 +88,12 @@ export itself: a theorem whose proof names a constant declared after it.
 
 `unpack` turns a Susz file back into ndjson. Packing that again gives the same
 bytes. `mdata` and `letE`'s `nondep` flag are dropped on the way in, so they
-don't come back.
+don't come back. With `-` as the output, `unpack` writes the ndjson to
+stdout as it goes, so it can feed a checker through a pipe without the
+ndjson ever touching the disk (CFSG's is 169 GB):
+`susz unpack cfsg.susz - | checker`. A file output only appears once it is
+complete; on stdout, an error stops the stream and what was already written
+stays written, so check the exit code.
 
 `slice` writes a Susz file that holds only some declarations and everything
 they depend on, in their original order: to check one heavy declaration of a
@@ -215,7 +220,9 @@ by the checked reader, which gives the error and its place. Of the 13.6 G of
 
 The pieces underneath are public too: `susz::read::File::open` opens a file
 and checks its framing, `File::main()` walks the records, `susz::read::Block`
-reads one proof block, and `susz::pack::pack_file` packs.
+reads one proof block, `susz::pack::pack_file` packs,
+`susz::unpack::unpack` writes ndjson to any `Write`, and
+`susz::slice::slice_file` slices.
 
 `susz::index::Lookup` finds declarations by name. It decodes the index once
 and keeps its place in MAIN between lookups. The binary search is the cheap

@@ -7,7 +7,7 @@ use susz::read::Outcome;
 const USAGE: &str = "usage:
   susz pack IN.ndjson OUT.susz [--no-index] [--threads N]
   susz verify FILE.susz [--index]
-  susz unpack FILE.susz OUT.ndjson
+  susz unpack FILE.susz OUT.ndjson|-
   susz slice IN.susz OUT.susz [--root NAME]... [--roots-file FILE] [--prefix NS]...
              [--no-index] [--threads N] [--quiet]
 
@@ -17,6 +17,8 @@ pack exits 0 when OUT is written, 1 when IN is not a valid export,
 an internal error). verify exits 0 accepted, 1 rejected (the file is
 malformed, or a declaration fails a rule a reader checks without types,
 such as rule P), 2 declined or unreadable. unpack exits 0 written, 1 rejected, 2 declined or I/O.
+unpack to - writes the ndjson to stdout as it goes; on an error it stops,
+and what was already written stays written.
 
 slice keeps the named declarations (--root, or one name per line of
 --roots-file), every declaration whose name starts with a --prefix string,
@@ -278,6 +280,20 @@ fn cmd_unpack(args: &[String]) {
     }
     let bytes = read_file(&args[0]);
     let out = &args[1];
+    if out == "-" {
+        // to stdout, as it is produced: nothing to clean up on failure
+        let res = (|| -> Result<(), susz::unpack::UnpackError> {
+            let mut w = std::io::BufWriter::with_capacity(1 << 20, std::io::stdout().lock());
+            susz::unpack::unpack(&bytes, &mut w)?;
+            use std::io::Write;
+            w.flush()?;
+            Ok(())
+        })();
+        if let Err(e) = res {
+            unpack_failed(e);
+        }
+        return;
+    }
     let tmp = format!("{out}.tmp-{}", std::process::id());
     susz::cleanup::register(&tmp);
     sigbus::output(Some(&tmp));
@@ -295,13 +311,17 @@ fn cmd_unpack(args: &[String]) {
     susz::cleanup::unregister();
     if let Err(e) = res {
         let _ = std::fs::remove_file(&tmp);
-        eprintln!("susz: {e}");
-        let code = match &e {
-            susz::unpack::UnpackError::File(f) if !f.class.declines() => 1,
-            _ => 2,
-        };
-        exit(code);
+        unpack_failed(e);
     }
+}
+
+fn unpack_failed(e: susz::unpack::UnpackError) -> ! {
+    eprintln!("susz: {e}");
+    let code = match &e {
+        susz::unpack::UnpackError::File(f) if !f.class.declines() => 1,
+        _ => 2,
+    };
+    exit(code)
 }
 
 fn cmd_slice(args: &[String]) {
