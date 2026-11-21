@@ -48,8 +48,8 @@ susz verify FILE.susz [--index]
 susz unpack FILE.susz OUT.ndjson|-
 susz slice IN.susz OUT.susz [--root NAME]... [--roots-file FILE] [--prefix NS]... [--no-index] [--threads N]
 susz axioms FILE.susz [--root NAME]... [--roots-file FILE] [--prefix NS]... [--all] [--threads N]
-susz digest FILE [--each]
-susz digest A B
+susz digest FILE [--each] [--kernel]
+susz digest A B [--kernel]
 ```
 
 `pack` converts an export. It uses all cores unless `--threads N` says how
@@ -189,6 +189,24 @@ or how many declarations differ, the first ten of them by name (`changed`,
 `only in A`, `only in B`, with their positions from #1), and whether the
 two hold the same declarations in another order.
 
+With `--kernel` it computes the kernel digest instead ([spec
+9.4](docs/spec.md#94-kernel-digest)): what a kernel checks, not what an
+exporter happened to write. Binder names (of `forallE`, `lam`, `letE`) and
+binder info do not count, and an inductive block's recursors count as a
+set, not in the order they are listed. Everything else counts as in the
+exact digest, including declaration names, level parameter names and the
+order of types, constructors and rules. The output says which digest it
+is: the digest line ends with ` (kernel)`, a comparison prints
+`same (kernel): DIGEST` or `different (kernel): ...`. Its own tags keep
+it apart from the exact digest: for a file with any declaration in it,
+the two never coincide, so they cannot be mixed up.
+
+Two exports of the RH/GRH project made from one Lean build by
+`lean4export` and by `olean-export` differ in 687,868 of their 1,468,418
+declarations by the exact digest: binder names, binder info, and the order
+of `Lean.Syntax`'s auxiliary recursors. The kernel digest is built to make
+such exports compare the same.
+
 The ndjson is read by a parser of its own, which shares no code with
 `pack`'s, so a bug in one would not hide on both sides. It reads what
 `pack` reads (spec 9.2) and is as strict: a record kind or a key it does
@@ -204,7 +222,8 @@ declaration. On the M2 Pro, one thread:
 | Init (331 MB ndjson, 34 MB Susz, 6.1 M expressions) | 1.0 s, 107 MB | 0.37 s, 99 MB |
 | cedar (832 MB, 89 MB, 14.2 M expressions) | 2.5 s, 248 MB | 0.95 s, 246 MB |
 
-(peak footprint). The ndjson goes at about 320 MB/s, so the 61.6 GB of the
+(peak footprint). `--kernel` takes the same time and memory (Init: 0.97 s
+and 0.35 s). The ndjson goes at about 320 MB/s, so the 61.6 GB of the
 Riemann hypothesis export should take some 3 to 4 minutes (not measured).
 
 ## Exit codes

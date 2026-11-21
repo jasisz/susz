@@ -689,6 +689,104 @@ declarations, not about how they are written.
 `SHA256(02 ‖ anon ‖ 03 00 00 00 00 00 00 00 ‖ "Nat")`,
 `68a9193ec9256ad58b3ddf294e10ce13`.
 
+Section 9.4 defines a second digest, the kernel digest. Where a digest is
+not qualified, it is this one, the exact digest.
+
+### 9.4 Kernel digest
+
+The kernel digest compares what a kernel checks. Two exports of one Lean
+build by different exporters can differ in metadata that no kernel looks
+at: binder names, binder info, the order in which an inductive block lists
+its recursors. Their exact digests differ; their kernel digests do not. A
+tool that prints a kernel digest MUST compute it as follows, and MUST label
+it as the kernel digest wherever it could be taken for the exact one.
+
+It is the exact digest of section 9.3, with these changes and no others.
+
+**Binders.** A binder is hashed without its name and, for `lam` and
+`forallE`, without its binder info. These nodes have tags of their own:
+
+| tag | node | fields |
+| --- | --- | --- |
+| `0x2a` | `lam` | type: h, body: h |
+| `0x2b` | `forallE` | type: h, body: h |
+| `0x2c` | `letE` | type: h, value: h, body: h |
+
+Every other name, level and expression node is hashed as in section 9.3,
+so a node with no binder in it has the same hash in both digests.
+
+**Declarations.** A declaration's tag is its section 9.3 tag plus `0x10`:
+`0x50` axiom, `0x51` definition, `0x52` theorem, `0x53` opaque, `0x54`
+quotient, `0x55` inductive block. The fields are those of section 9.3,
+except the recursors of an inductive block.
+
+**Recursors.** An inductive block's recursors are hashed as a set. Each
+recursor's node hash is the first 16 bytes of `SHA256(0x56 ‖ fields)`,
+where the fields are the recursor's fields of section 9.3 (head, isUnsafe,
+all, numParams, numIndices, numMotives, numMinors, rules, k). The block's
+encoding ends with these node hashes sorted in ascending byte order, as
+`hs`, in place of the recursors:
+
+| tag | declaration | fields |
+| --- | --- | --- |
+| `0x55` | inductive block | types: u64 count, then each type; ctors: u64 count, then each constructor; recs: hs, sorted |
+
+A block's recursors have distinct names (section 5.2), so their node
+hashes differ unless SHA-256 collides, and sorting them gives one order.
+
+The file digest is `SHA256(d0 ‖ d1 ‖ … ‖ dn−1)` over the kernel
+declaration digests, in declaration order, as in section 9.3. The tags
+keep the two digests apart: a declaration never has the same digest in
+both, and neither does a file with a declaration in it (a file with none
+has `SHA256("")` in both).
+
+**What is left out, and why.** A kernel identifies a bound variable by its
+de Bruijn index, never by the binder's name, and it type checks and
+compares terms without binder info (Lean's own `Expr.eqv` ignores both).
+It finds a recursor by its name: the order of the `recs` list says nothing
+the names do not (the auxiliary recursors of a nested inductive, `rec_1`,
+`rec_2`, …, are numbered by name, and exporters list them in different
+orders).
+
+**What still counts, and why.** Everything else, notably:
+
+- The names of declarations, constants, projections' structures,
+  constructors in rules and in `ctors` and `all` lists: a kernel looks
+  declarations up by name.
+- Level parameter names and their order. They are binders too, but `param`
+  levels refer to them by name; leaving them out would need renaming up to
+  alpha over level parameters, which this digest does not do.
+- The order of a block's `types` (the mutual block's order: it fixes the
+  order of the motives of its recursors) and of its `ctors`, and of each
+  type's `ctors` list (a constructor's index, `cidx`, and the order of the
+  minor premises). The block's `ctors` list repeats what the types' lists
+  and `cidx` say, but it stays ordered, as in section 9.3: the exporters
+  we know write it in one order, so keeping it costs no false difference.
+- The order of each recursor's `rules`, which follow the constructors.
+- The `all` lists, in order, of every declaration. For an inductive type
+  and a recursor, it is the mutual block in its order. For a definition,
+  theorem or opaque it names the mutual group the declaration was checked
+  with; a kernel does not need its order, but a different list is a
+  different declaration, and the exporters we know agree on it.
+- Reducibility hints, safety, `isUnsafe`, `k`, the numbers of parameters,
+  indices, motives, minors, fields and nested types, `isRec` and
+  `isReflexive`, and the quotient kind: a kernel either checks them or
+  acts on them.
+- The order of the declarations: a kernel checks them in that order.
+- Nat and String literals as written: a literal is not unfolded to
+  constructors.
+
+What section 9.1 drops (`mdata`, `letE.nondep`) is left out of both
+digests.
+
+**Example.** `fun (x : Nat) => x` with any binder name and binder info:
+`const Nat` is the first 16 bytes of `SHA256(22 ‖ h(Nat) ‖ 00 00 00 00 00
+00 00 00)`, `e3af5a8ee0166bc38c922f6f183a7e1d`, in both digests; `bvar 0`
+is `b524830fb1b95fef6024db23ac1d140a`. The `lam` is the first 16 bytes of
+`SHA256(2a ‖ h(const Nat) ‖ h(bvar 0))`,
+`e4265d6a97e21249b25637451d17621e`. Its exact hash with the name `x` and
+the default binder is `e3d53cb12a1829152fe919aa0a80ac9d`.
+
 ## 10. Conformance
 
 A conformant **reader** MUST:

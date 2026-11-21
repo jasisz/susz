@@ -437,3 +437,92 @@ fn digest_exit_codes() {
     );
     assert_eq!(run(&["-".as_ref(), "-".as_ref()], None).0, 2);
 }
+
+// `digest --kernel`: the kernel digest, marked `(kernel)`; two exports that
+// differ only in a binder's name and binder info are the same to it, and
+// not to the exact digest.
+#[test]
+fn digest_kernel() {
+    let one = |name: &str, bi: &str| {
+        format!(
+            "{{\"meta\":{{\"format\":{{\"version\":\"3.1.0\"}}}}}}\n\
+{{\"in\":1,\"str\":{{\"pre\":0,\"str\":\"A\"}}}}\n\
+{{\"in\":2,\"str\":{{\"pre\":0,\"str\":\"{name}\"}}}}\n\
+{{\"ie\":0,\"sort\":0}}\n\
+{{\"ie\":1,\"forallE\":{{\"binderInfo\":\"{bi}\",\"body\":0,\"name\":2,\"type\":0}}}}\n\
+{{\"axiom\":{{\"isUnsafe\":false,\"levelParams\":[],\"name\":1,\"type\":1}}}}\n"
+        )
+    };
+    let (c, a) = pack("digest-k-a", &one("x", "default"));
+    assert_eq!(c, 0);
+    let b = tmp("digest-k-b.ndjson");
+    std::fs::write(&b, one("y", "implicit")).unwrap();
+    let run = |args: &[&std::ffi::OsStr]| {
+        let o = bin().arg("digest").args(args).output().unwrap();
+        (
+            o.status.code().unwrap_or(-1),
+            String::from_utf8(o.stdout).unwrap(),
+        )
+    };
+    let k: &std::ffi::OsStr = "--kernel".as_ref();
+    let e: &std::ffi::OsStr = "--each".as_ref();
+    // one file: the digest line says (kernel); the flag goes anywhere
+    let (c, x) = run(&[a.as_os_str()]);
+    assert_eq!(c, 0);
+    let (c, ka) = run(&[k, a.as_os_str()]);
+    assert_eq!(c, 0);
+    assert_eq!(run(&[a.as_os_str(), k]), (0, ka.clone()));
+    let (xl, kl): (Vec<&str>, Vec<&str>) = (x.lines().collect(), ka.lines().collect());
+    assert_eq!(kl.len(), 2, "{ka}");
+    assert_eq!(xl[0].len(), 64);
+    assert_eq!(kl[0].len(), 64 + " (kernel)".len());
+    assert!(kl[0].ends_with(" (kernel)"), "{ka}");
+    assert_ne!(&kl[0][..64], xl[0]);
+    assert_eq!(kl[1], xl[1]);
+    // the other export: another exact digest, the same kernel digest
+    let (_, xb) = run(&[b.as_os_str()]);
+    assert_ne!(xb, x);
+    assert_eq!(run(&[b.as_os_str(), k]), (0, ka.clone()));
+    // --each
+    let (c, ea) = run(&[e, k, a.as_os_str()]);
+    assert_eq!(c, 0);
+    assert_eq!(run(&[k, e, b.as_os_str()]), (0, ea.clone()));
+    let el: Vec<&str> = ea.lines().collect();
+    assert_eq!(el.len(), 3);
+    assert!(el[0].ends_with(" axiom A"), "{ea}");
+    assert_eq!(&el[1..], &kl[..]);
+    let (_, ex) = run(&[e, a.as_os_str()]);
+    assert_ne!(ex.lines().next(), el.first().copied());
+    // two files
+    let (c, t) = run(&[a.as_os_str(), b.as_os_str()]);
+    assert_eq!(c, 1, "{t}");
+    assert!(t.starts_with("different: A "), "{t}");
+    assert!(t.contains("  changed A (A #1, B #1)"), "{t}");
+    let (c, t) = run(&[k, a.as_os_str(), b.as_os_str()]);
+    assert_eq!(c, 0, "{t}");
+    assert_eq!(
+        t,
+        format!("same (kernel): {}\n{}\n", &kl[0][..64], kl[1]),
+        "{t}"
+    );
+    // a real difference: Type, not Prop
+    let other = tmp("digest-k-other.ndjson");
+    std::fs::write(
+        &other,
+        one("y", "implicit").replace(
+            "{\"ie\":0,\"sort\":0}",
+            "{\"il\":1,\"succ\":0}\n{\"ie\":0,\"sort\":1}",
+        ),
+    )
+    .unwrap();
+    let (c, t) = run(&[a.as_os_str(), other.as_os_str(), k]);
+    assert_eq!(c, 1, "{t}");
+    let tl: Vec<&str> = t.lines().collect();
+    assert!(tl[0].starts_with("different (kernel): A "), "{t}");
+    assert!(tl[1].starts_with("                    B "), "{t}");
+    assert_eq!(tl[0].find(" A ").unwrap(), tl[1].find(" B ").unwrap());
+    assert!(t.contains("  changed A (A #1, B #1)"), "{t}");
+    // usage: --each with two files, an unknown option
+    assert_eq!(run(&[k, e, a.as_os_str(), b.as_os_str()]).0, 2);
+    assert_eq!(run(&["--kernels".as_ref(), a.as_os_str()]).0, 2);
+}
