@@ -38,6 +38,8 @@ cargo install susz --features mmap   # verify and unpack map the file
 
 Or the latest from this repository: `cargo install --git https://github.com/jasisz/susz`.
 
+The crate's version is not the format's. Every release so far, 0.2 included, writes and reads Susz 1 ([docs/spec.md](docs/spec.md)), so files packed by any of them read with any other. 0.2.0 changed only the library's `digest` API.
+
 ## Usage
 
 ```sh
