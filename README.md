@@ -46,6 +46,8 @@ susz verify FILE.susz [--index]
 susz unpack FILE.susz OUT.ndjson|-
 susz slice IN.susz OUT.susz [--root NAME]... [--roots-file FILE] [--prefix NS]... [--no-index] [--threads N]
 susz axioms FILE.susz [--root NAME]... [--roots-file FILE] [--prefix NS]... [--all] [--threads N]
+susz digest FILE [--each]
+susz digest A B
 ```
 
 `pack` converts an export. It uses all cores unless `--threads N` says how
@@ -151,6 +153,58 @@ unused sorryAx
 The answer is about the dependency graph only: it says what the root rests
 on if every declaration on the way checks.
 
+`digest` tells whether two files hold the same declarations, whatever their
+form: say, that a Susz file holds exactly what the ndjson export it was
+packed from holds. FILE is a Susz file or an ndjson export (told apart by
+the Susz magic, not by the name), and `-` reads either from stdin, so a
+compressed export never has to touch the disk:
+
+```sh
+$ susz digest init.susz
+147711de3f99a612f5601445ac6d248c8e0c1c30aa8c081d24741aad32239948
+58170 declarations: 7 axiom, 15227 def, 42070 thm, 247 opaque, 4 quot, 615 inductive
+$ zstd -d < init.ndjson.zst | susz digest -
+147711de3f99a612f5601445ac6d248c8e0c1c30aa8c081d24741aad32239948
+58170 declarations: 7 axiom, 15227 def, 42070 thm, 247 opaque, 4 quot, 615 inductive
+```
+
+The first line is the file digest, the second the declarations by kind; the
+two lines are the same for both forms of one export. On stderr it says what
+it read (names, levels, expressions: those counts differ between the forms,
+since Susz drops `mdata`). The digest is SHA-256, over every declaration in
+order, with names, levels and expressions hashed by structure. Ids, the
+order of the records, the Susz layout, `mdata` and `letE`'s `nondep` flag
+don't count; everything else in a declaration does, and so does the order
+of the declarations. It is specified byte for byte in [spec section
+9.3](docs/spec.md#93-digest), so anyone can compute it with their own code.
+
+With `--each` it first prints one line per declaration, in file order:
+its digest, its kind (`axiom`, `def`, `thm`, `opaque`, `quot`,
+`inductive`) and its name (an inductive block's is its first type's;
+control characters in a name are written `\xHH`). Two such listings can be
+compared with `diff`. With two files `digest` compares them: `same: DIGEST`,
+or how many declarations differ, the first ten of them by name (`changed`,
+`only in A`, `only in B`, with their positions from #1), and whether the
+two hold the same declarations in another order.
+
+The ndjson is read by a parser of its own, which shares no code with
+`pack`'s, so a bug in one would not hide on both sides. It reads what
+`pack` reads (spec 9.2) and is as strict: a record kind or a key it does
+not know is an error, not skipped. It holds 16 bytes for each name, level
+and expression (and, with `--each` or two files, each name's component):
+about 17 GB for the 1.07 billion expressions of the Riemann hypothesis
+export. A Susz file is read with the reader, which checks everything
+`verify` checks except rule P; a theorem that breaks rule P still has its
+declaration. On the M2 Pro, one thread:
+
+| | ndjson | Susz |
+| --- | --- | --- |
+| Init (331 MB ndjson, 34 MB Susz, 6.1 M expressions) | 1.0 s, 107 MB | 0.37 s, 99 MB |
+| cedar (832 MB, 89 MB, 14.2 M expressions) | 2.5 s, 248 MB | 0.95 s, 246 MB |
+
+(peak footprint). The ndjson goes at about 320 MB/s, so the 61.6 GB of the
+Riemann hypothesis export should take some 3 to 4 minutes (not measured).
+
 ## Exit codes
 
 | command | 0 | 1 | 2 |
@@ -160,6 +214,7 @@ on if every declaration on the way checks.
 | `unpack` | written | broken | needs a newer reader, or I/O |
 | `slice` | written | the input is rejected, a root names no declaration, or no declaration matches | needs a newer reader, I/O, a limit, or a bug |
 | `axioms` | listed | the input is rejected, a root names no declaration, or no declaration matches | needs a newer reader, or unreadable |
+| `digest` | printed, or the two are the same | the two differ | a file is malformed, not a valid export, needs a newer reader, unreadable, or I/O |
 
 A panic counts as a bug: exit 2, and the partial output is removed.
 

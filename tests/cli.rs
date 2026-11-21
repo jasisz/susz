@@ -170,7 +170,12 @@ fn unpack_to_stdout() {
         ("reject/back-distance-past-start.susz", 1),
         ("decline/major-2.susz", 2),
     ] {
-        let st = bin().arg("unpack").arg(v.join(f)).arg("-").output().unwrap();
+        let st = bin()
+            .arg("unpack")
+            .arg(v.join(f))
+            .arg("-")
+            .output()
+            .unwrap();
         assert_eq!(st.status.code(), Some(code), "{f}");
     }
 }
@@ -312,4 +317,123 @@ fn axioms_exit_codes() {
         let st = bin().arg("axioms").args(args).output().unwrap();
         assert_eq!(st.status.code(), Some(2), "{args:?}");
     }
+}
+
+// `digest`: the same output for an export and its Susz file, on a path or
+// on stdin; comparing gives 0 same, 1 different (naming the declaration),
+// 2 for a file it cannot read.
+#[test]
+fn digest_exit_codes() {
+    use std::io::Write;
+    let two = GOOD.to_string()
+        + "{\"in\":2,\"str\":{\"pre\":0,\"str\":\"B\"}}\n\
+{\"axiom\":{\"isUnsafe\":false,\"levelParams\":[],\"name\":2,\"type\":0}}\n";
+    let (c, out) = pack("digest", &two);
+    assert_eq!(c, 0);
+    let nd = tmp("digest.ndjson");
+    let run = |args: &[&std::ffi::OsStr], stdin: Option<&[u8]>| {
+        let mut cmd = bin();
+        cmd.arg("digest").args(args);
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut ch = cmd.spawn().unwrap();
+        let mut i = ch.stdin.take().unwrap();
+        if let Some(b) = stdin {
+            i.write_all(b).unwrap();
+        }
+        drop(i);
+        let o = ch.wait_with_output().unwrap();
+        (
+            o.status.code().unwrap_or(-1),
+            String::from_utf8(o.stdout).unwrap(),
+        )
+    };
+    let (c1, a) = run(&[out.as_os_str()], None);
+    let (c2, b) = run(&[nd.as_os_str()], None);
+    let (c3, s) = run(&["-".as_ref()], Some(two.as_bytes()));
+    let (c4, z) = run(&["-".as_ref()], Some(&std::fs::read(&out).unwrap()));
+    assert_eq!((c1, c2, c3, c4), (0, 0, 0, 0));
+    assert_eq!(a, b);
+    assert_eq!(a, s);
+    assert_eq!(a, z);
+    let lines: Vec<&str> = a.lines().collect();
+    assert_eq!(lines.len(), 2, "{a}");
+    assert_eq!(lines[0].len(), 64);
+    assert_eq!(
+        lines[1],
+        "2 declarations: 2 axiom, 0 def, 0 thm, 0 opaque, 0 quot, 0 inductive"
+    );
+    // --each: one line a declaration, then the same two lines
+    let (c, e) = run(&["--each".as_ref(), out.as_os_str()], None);
+    assert_eq!(c, 0);
+    let (_, e2) = run(&["--each".as_ref(), nd.as_os_str()], None);
+    assert_eq!(e, e2);
+    let el: Vec<&str> = e.lines().collect();
+    assert_eq!(el.len(), 4);
+    assert!(
+        el[0].ends_with(" axiom A") && el[1].ends_with(" axiom B"),
+        "{e}"
+    );
+    assert_eq!(el[0].len(), 64 + " axiom A".len());
+    assert_eq!(&el[2..], &lines[..]);
+    // the same
+    let (c, t) = run(&[out.as_os_str(), nd.as_os_str()], None);
+    assert_eq!(c, 0, "{t}");
+    assert!(t.starts_with("same: "), "{t}");
+    // B's type changed: B differs, A does not
+    let other = tmp("digest-other.ndjson");
+    std::fs::write(
+        &other,
+        two.replace("\"name\":2,\"type\":0", "\"name\":2,\"type\":1")
+            .replace(
+                "{\"ie\":0,\"sort\":0}\n",
+                "{\"ie\":0,\"sort\":0}\n{\"ie\":1,\"bvar\":0}\n",
+            ),
+    )
+    .unwrap();
+    let (c, t) = run(&[out.as_os_str(), other.as_os_str()], None);
+    assert_eq!(c, 1, "{t}");
+    assert!(
+        t.contains("1 declarations differ: 1 changed, 0 only in A, 0 only in B")
+            && t.contains("  changed B (A #2, B #2)"),
+        "{t}"
+    );
+    // the two declarations swapped: the same ones, in another order
+    let swapped = tmp("digest-swapped.ndjson");
+    let mut ls: Vec<&str> = two.lines().collect();
+    let n = ls.len();
+    let a1 = ls.iter().position(|l| l.starts_with("{\"axiom\"")).unwrap();
+    // B's name record comes first
+    ls.swap(a1, n - 1);
+    let (i, j) = (a1, n - 2);
+    ls.swap(i, j);
+    std::fs::write(&swapped, ls.join("\n") + "\n").unwrap();
+    let (c, t) = run(&[out.as_os_str(), swapped.as_os_str()], None);
+    assert_eq!(c, 1, "{t}");
+    assert!(
+        t.contains("the same declarations in another order: the first difference is declaration #1: A A, B B"),
+        "{t}"
+    );
+    // unreadable, malformed, unknown kind: 2
+    let missing = tmp("digest-missing.ndjson");
+    let _ = std::fs::remove_file(&missing);
+    assert_eq!(run(&[missing.as_os_str()], None).0, 2);
+    let bad = tmp("digest-bad.ndjson");
+    std::fs::write(&bad, GOOD.replace("\"sort\"", "\"sorts\"")).unwrap();
+    assert_eq!(run(&[bad.as_os_str()], None).0, 2);
+    assert_eq!(run(&[out.as_os_str(), bad.as_os_str()], None).0, 2);
+    let mut b = std::fs::read(&out).unwrap();
+    let k = b.len() - 3;
+    b[k] ^= 0x55;
+    let broken = tmp("digest-broken.susz");
+    std::fs::write(&broken, &b).unwrap();
+    assert_eq!(run(&[broken.as_os_str()], None).0, 2);
+    // usage
+    assert_eq!(run(&[], None).0, 2);
+    assert_eq!(
+        run(&["--each".as_ref(), out.as_os_str(), nd.as_os_str()], None).0,
+        2
+    );
+    assert_eq!(run(&["-".as_ref(), "-".as_ref()], None).0, 2);
 }
