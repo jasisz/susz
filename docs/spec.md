@@ -591,6 +591,104 @@ A packer refuses an input in one of two classes. The `susz` tool exits with
   projection index), more than 2^32 − 1 names, levels, expressions or
   declarations, a packer's own limit, and I/O errors.
 
+### 9.3 Digest
+
+The digest says which declarations a file holds, so that a Susz file can be
+checked against the export it was packed from, or two files of either form
+against each other. It replaces the 64-bit digest of earlier releases of
+the reference crate, which had no per-declaration form and a weak hash. A
+reader does not need it; a tool that prints a Susz digest MUST compute it
+as follows, from Susz or from lean4export 3.1 ndjson alike.
+
+It is computed on structure. Ids, line order, the Susz layout (MAIN or
+proof block, frontier, INDEX, SOURCE, PAD) do not count, and neither does
+what section 9.1 drops: an `mdata` expression has the hash of the
+expression it wraps, and `letE.nondep` is not hashed. Everything else in a
+declaration counts, and so does the order of the declarations.
+
+**Hashes.** `SHA256` is SHA-256 (FIPS 180-4). The hash of a name, a level
+or an expression, a **node hash**, is the first 16 bytes of `SHA256(enc)`.
+A declaration digest is the whole 32 bytes of `SHA256(enc)`. The **file
+digest** is `SHA256(d0 ‖ d1 ‖ … ‖ dn−1)`, the declaration digests (32 bytes
+each) in declaration order; for no declaration it is `SHA256("")`. Tools
+print digests as lowercase hex.
+
+**Encoding.** `enc` is a tag byte, then the fields in the order given. A
+field is one of:
+
+- `u8`: one byte (binder, a bool as `0x00`/`0x01`, an enum);
+- `u64`: 8 bytes, little-endian;
+- `h`: the 16-byte node hash of the name, level or expression referred to;
+- `bytes`: a `u64` length, then the bytes;
+- `hs`: a `u64` count, then that many `h`.
+
+| tag | node | fields |
+| --- | --- | --- |
+| `0x01` | anonymous name | none |
+| `0x02` | name `str` | prefix: h, component: bytes (UTF-8) |
+| `0x03` | name `num` | prefix: h, component: u64 |
+| `0x10` | level zero | none |
+| `0x11` | `succ` | h |
+| `0x12` | `max` | h, h |
+| `0x13` | `imax` | h, h |
+| `0x14` | `param` | name: h |
+| `0x20` | `bvar` | index: u64 |
+| `0x21` | `sort` | level: h |
+| `0x22` | `const` | name: h, levels: hs |
+| `0x23` | `app` | fn: h, arg: h |
+| `0x24` | `lam` | binder: u8, name: h, type: h, body: h |
+| `0x25` | `forallE` | binder: u8, name: h, type: h, body: h |
+| `0x26` | `letE` | name: h, type: h, value: h, body: h |
+| `0x27` | `natVal` | value: bytes, the canonical decimal |
+| `0x28` | `strVal` | value: bytes (UTF-8) |
+| `0x29` | `proj` | struct: h, field: u64, expr: h |
+
+Binder: 0 default, 1 implicit, 2 strict implicit, 3 instance implicit, as in
+section 5.1 (ndjson `default`, `implicit`, `strictImplicit`,
+`instImplicit`). Strings are hashed as their UTF-8 bytes, without
+normalising. The **canonical decimal** of a Nat literal is its ASCII
+digits, with no sign and no leading zero, and `0` for zero. On the ndjson
+side it is the `natVal` text with its leading zeros removed (one `0` stays
+for zero); on the Susz side, the `nat` bytes written in decimal. A name
+anywhere is hashed by value, so two Susz name records for the same name
+(section 5.2) have the same hash.
+
+Declarations, where `head` is name: h, levelParams: hs, type: h:
+
+| tag | declaration | fields |
+| --- | --- | --- |
+| `0x40` | axiom | head, isUnsafe: u8 |
+| `0x41` | definition | head, value: h, hints, safety: u8, all: hs |
+| `0x42` | theorem | head, value: h, all: hs |
+| `0x43` | opaque | head, value: h, isUnsafe: u8, all: hs |
+| `0x44` | quotient | head, kind: u8 (0 type, 1 ctor, 2 lift, 3 ind) |
+| `0x45` | inductive block | types: u64 count, then each type; ctors: u64 count, then each constructor; recs: u64 count, then each recursor |
+
+- Hints: `0x00` opaque, `0x01` abbrev, or `0x02` then height: u64
+  (regular).
+- Safety: 0 safe, 1 unsafe, 2 partial.
+- Inductive type: head, isUnsafe: u8, numParams: u64, numIndices: u64, all:
+  hs, ctors: hs, numNested: u64, isRec: u8, isReflexive: u8.
+- Constructor: head, isUnsafe: u8, induct: h, cidx: u64, numParams: u64,
+  numFields: u64.
+- Recursor: head, isUnsafe: u8, all: hs, numParams: u64, numIndices: u64,
+  numMotives: u64, numMinors: u64, rules: u64 count then each rule as
+  ctor: h, nfields: u64, rhs: h; then k: u8.
+
+A theorem whose proof sits in a block (kind 6) is a theorem, tag `0x42`,
+whose value is the block's last expression. The fields follow section 5.2,
+so the Susz side reads them in record order; an ndjson object's keys come
+in any order and are put in this one.
+
+A file that is malformed, or an export that is not valid, has no digest. A
+Susz file that breaks rule P (section 6) has one: the rule is about the
+declarations, not about how they are written.
+
+**Example.** The anonymous name is the first 16 bytes of `SHA256(01)`,
+`4bf5122f344554c53bde2ebb8cd2b7e3`. The name `Nat` is the first 16 bytes of
+`SHA256(02 ‖ anon ‖ 03 00 00 00 00 00 00 00 ‖ "Nat")`,
+`68a9193ec9256ad58b3ddf294e10ce13`.
+
 ## 10. Conformance
 
 A conformant **reader** MUST:
@@ -619,8 +717,8 @@ byte on every corpus file, for each setting.
 
 - **Format.** A vector is `vectors/{accept,reject,decline}/NAME.susz` plus
   `NAME.expect`. The `.expect` file gives the outcome, class, section, offset
-  and record number. For an accept vector it gives the counts and a digest of
-  the decoded records. Vectors are generated from a small textual assembler
+  and record number. For an accept vector it gives the counts and the file
+  digest of its declarations (section 9.3). Vectors are generated from a small textual assembler
   (`susz-asm`, a dev tool in the reference crate), so each one can be
   reviewed. Every reject vector is one minimal change to an accept vector,
   and is named after the rule it breaks.

@@ -1,4 +1,4 @@
-// The `susz` command: pack, verify, unpack, slice, axioms.
+// The `susz` command: pack, verify, unpack, slice, axioms, digest.
 
 use std::process::exit;
 use susz::pack::{self, Fault, Options};
@@ -12,6 +12,8 @@ const USAGE: &str = "usage:
              [--no-index] [--threads N] [--quiet]
   susz axioms FILE.susz [--root NAME]... [--roots-file FILE] [--prefix NS]...
               [--all] [--threads N] [--quiet]
+  susz digest FILE [--each]
+  susz digest A B
 
 pack uses all cores unless --threads N is given; the output is the same.
 pack exits 0 when OUT is written, 1 when IN is not a valid export,
@@ -32,7 +34,18 @@ closure slice would keep for the same roots; with no root or prefix, every
 axiom FILE declares. With --all it prints every axiom FILE declares, each
 after `used ` or `unused `. It writes no file; --threads is accepted as
 slice takes it and changes nothing. It exits 0 listed, 1 FILE rejected,
-a root not found or no declaration matched, 2 declined or unreadable.";
+a root not found or no declaration matched, 2 declined or unreadable.
+
+digest prints the digest of the declarations FILE holds (spec 9.3), then a
+line with their number by kind. FILE is a Susz file (told by its magic) or
+an ndjson export; - reads either from stdin (zstd -d < x.zst | susz digest -).
+The digest hashes names, levels and expressions by structure: a Susz file
+and the export it was packed from give the same digest, and so do two
+exports that differ only in ids, layout, mdata or letE's nondep. With
+--each it first prints one line per declaration, in file order:
+DIGEST KIND NAME. With two files it compares them, and names the first
+declarations that differ. It exits 0 printed (or the same), 1 different,
+2 when a file is malformed, not a valid export, declined, unreadable or I/O.";
 
 extern "C" {
     fn _exit(code: i32) -> !;
@@ -54,6 +67,7 @@ fn main() {
         "unpack" => cmd_unpack(&args[1..]),
         "slice" => cmd_slice(&args[1..]),
         "axioms" => cmd_axioms(&args[1..]),
+        "digest" => cmd_digest(&args[1..]),
         "--version" | "-V" => println!(
             "susz {} (Susz {})",
             env!("CARGO_PKG_VERSION"),
@@ -486,4 +500,257 @@ fn cmd_axioms(args: &[String]) {
             exit(code);
         }
     }
+}
+
+// One declaration as `digest` keeps it to compare two files.
+struct Got {
+    sum: susz::digest::Summary,
+    digests: Vec<susz::digest::Hash>,
+    names: Vec<String>,
+}
+
+// The digest of FILE: Susz if it starts with the magic, ndjson otherwise; -
+// is stdin. `each` sees every declaration; `names` asks for their names.
+fn digest_of(
+    path: &str,
+    names: bool,
+    each: &mut susz::digest::Each<'_>,
+) -> Result<(susz::digest::Summary, bool), susz::digest::Error> {
+    use std::io::{BufReader, Read};
+    let magic = susz::format::MAGIC;
+    // the first bytes, up to the magic's length
+    let head = |r: &mut dyn Read| -> std::io::Result<Vec<u8>> {
+        let mut b = Vec::with_capacity(magic.len());
+        r.take(magic.len() as u64).read_to_end(&mut b)?;
+        Ok(b)
+    };
+    if path == "-" {
+        let mut stdin = std::io::stdin().lock();
+        let first = head(&mut stdin)?;
+        if first == magic {
+            let mut bytes = first;
+            stdin.read_to_end(&mut bytes)?;
+            return susz::digest::susz(&bytes, names, each).map(|s| (s, true));
+        }
+        let r = BufReader::with_capacity(1 << 20, std::io::Cursor::new(first).chain(stdin));
+        return susz::digest::ndjson(r, names, each).map(|s| (s, false));
+    }
+    let mut f = std::fs::File::open(path)?;
+    if head(&mut f)? == magic {
+        drop(f);
+        let bytes = read_file(path);
+        return susz::digest::susz(&bytes, names, each).map(|s| (s, true));
+    }
+    use std::io::Seek;
+    f.rewind()?;
+    susz::digest::ndjson(BufReader::with_capacity(1 << 20, f), names, each).map(|s| (s, false))
+}
+
+fn digest_failed(path: &str, e: susz::digest::Error) -> ! {
+    let p = if path == "-" { "stdin" } else { path };
+    eprintln!("susz: {p}: {e}");
+    exit(2)
+}
+
+// What was read, on stderr: the counts differ between the forms of one
+// export (proof blocks, mdata), the declarations do not.
+fn digest_counts(path: &str, s: &susz::digest::Summary, susz_form: bool) {
+    let p = if path == "-" { "stdin" } else { path };
+    if susz_form {
+        eprintln!(
+            "{p}: Susz, {} names, {} levels, {} expressions ({} in proof blocks)",
+            s.names, s.levels, s.exprs, s.extra
+        );
+    } else {
+        eprintln!(
+            "{p}: ndjson, {} names, {} levels, {} expressions ({} mdata)",
+            s.names, s.levels, s.exprs, s.extra
+        );
+    }
+}
+
+fn cmd_digest(args: &[String]) {
+    use std::io::Write;
+    use susz::digest::{hex, printable, KINDS};
+    let mut each = false;
+    let mut files = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "--each" => each = true,
+            "-" => files.push(a.clone()),
+            a if a.starts_with('-') => usage(),
+            a => files.push(a.to_string()),
+        }
+    }
+    let stdin_twice = files.len() == 2 && files[0] == "-" && files[1] == "-";
+    if files.is_empty() || files.len() > 2 || (each && files.len() == 2) || stdin_twice {
+        usage();
+    }
+    let out = std::io::stdout();
+    if files.len() == 1 {
+        let path = &files[0];
+        let mut w = std::io::BufWriter::with_capacity(1 << 16, out.lock());
+        let mut line = |e: susz::digest::Entry<'_>| -> std::io::Result<()> {
+            writeln!(
+                w,
+                "{} {} {}",
+                hex(&e.digest),
+                KINDS[e.kind as usize],
+                printable(e.name)
+            )
+        };
+        let res = if each {
+            digest_of(path, true, &mut line)
+        } else {
+            digest_of(path, false, &mut |_| Ok(()))
+        };
+        drop(line);
+        let (s, form) = res.unwrap_or_else(|e| digest_failed(path, e));
+        digest_counts(path, &s, form);
+        let res = writeln!(w, "{}", hex(&s.digest))
+            .and_then(|()| writeln!(w, "{}", s.declarations_line()))
+            .and_then(|()| w.flush());
+        if let Err(e) = res {
+            eprintln!("susz: cannot write the digest: {e}");
+            exit(2);
+        }
+        return;
+    }
+    // two files, one after the other: only one file's tables at a time
+    let mut got = Vec::new();
+    for path in &files {
+        let mut digests = Vec::new();
+        let mut names = Vec::new();
+        let (s, form) = digest_of(path, true, &mut |e| {
+            digests.push(e.digest);
+            names.push(e.name.to_string());
+            Ok(())
+        })
+        .unwrap_or_else(|e| digest_failed(path, e));
+        digest_counts(path, &s, form);
+        got.push(Got {
+            sum: s,
+            digests,
+            names,
+        });
+    }
+    let (a, b) = (&got[0], &got[1]);
+    let mut w = std::io::BufWriter::new(out.lock());
+    let res = digest_compare(&mut w, a, b).and_then(|same| {
+        w.flush()?;
+        Ok(same)
+    });
+    match res {
+        Ok(true) => {}
+        Ok(false) => exit(1),
+        Err(e) => {
+            eprintln!("susz: cannot write the comparison: {e}");
+            exit(2);
+        }
+    }
+}
+
+// How many differing declarations are named.
+const SHOWN: usize = 10;
+
+// Writes the comparison; true when the two files hold the same declarations
+// in the same order.
+fn digest_compare(w: &mut impl std::io::Write, a: &Got, b: &Got) -> std::io::Result<bool> {
+    use std::collections::HashMap;
+    use susz::digest::{hex, printable};
+    if a.sum.digest == b.sum.digest {
+        writeln!(w, "same: {}", hex(&a.sum.digest))?;
+        writeln!(w, "{}", a.sum.declarations_line())?;
+        return Ok(true);
+    }
+    writeln!(w, "different: A {}", hex(&a.sum.digest))?;
+    writeln!(w, "           B {}", hex(&b.sum.digest))?;
+    writeln!(w, "A: {}", a.sum.declarations_line())?;
+    writeln!(w, "B: {}", b.sum.declarations_line())?;
+    // each side's declarations that the other one does not hold (as a
+    // multiset of digests), in file order; and those it does
+    let unmatched = |x: &Got, y: &Got| -> (Vec<usize>, Vec<usize>) {
+        let mut have: HashMap<&susz::digest::Hash, u32> = HashMap::new();
+        for d in &y.digests {
+            *have.entry(d).or_default() += 1;
+        }
+        let (mut un, mut kept) = (Vec::new(), Vec::new());
+        for (i, d) in x.digests.iter().enumerate() {
+            match have.get_mut(d) {
+                Some(c) if *c > 0 => {
+                    *c -= 1;
+                    kept.push(i);
+                }
+                _ => un.push(i),
+            }
+        }
+        (un, kept)
+    };
+    let (ua, ka) = unmatched(a, b);
+    let (ub, kb) = unmatched(b, a);
+    let kept_order_differs = ka
+        .iter()
+        .zip(&kb)
+        .any(|(&i, &j)| a.digests[i] != b.digests[j]);
+    if ua.is_empty() && ub.is_empty() {
+        let i = (0..a.digests.len())
+            .find(|&i| a.digests[i] != b.digests[i])
+            .unwrap_or(0);
+        writeln!(
+            w,
+            "the same declarations in another order: the first difference is declaration #{}: A {}, B {}",
+            i + 1,
+            printable(&a.names[i]),
+            printable(&b.names[i])
+        )?;
+        return Ok(false);
+    }
+    // by name: changed (on both sides), only in A, only in B
+    let in_b: HashMap<&str, usize> = ub.iter().map(|&j| (b.names[j].as_str(), j)).collect();
+    let in_a: HashMap<&str, usize> = ua.iter().map(|&i| (a.names[i].as_str(), i)).collect();
+    let mut lines = Vec::new();
+    let (mut changed, mut only_a, mut only_b) = (0u64, 0u64, 0u64);
+    for &i in &ua {
+        let n = a.names[i].as_str();
+        match in_b.get(n) {
+            Some(&j) => {
+                changed += 1;
+                lines.push(format!(
+                    "  changed {} (A #{}, B #{})",
+                    printable(n),
+                    i + 1,
+                    j + 1
+                ));
+            }
+            None => {
+                only_a += 1;
+                lines.push(format!("  only in A: {} (#{})", printable(n), i + 1));
+            }
+        }
+    }
+    for &j in &ub {
+        let n = b.names[j].as_str();
+        if !in_a.contains_key(n) {
+            only_b += 1;
+            lines.push(format!("  only in B: {} (#{})", printable(n), j + 1));
+        }
+    }
+    writeln!(
+        w,
+        "{} declarations differ: {changed} changed, {only_a} only in A, {only_b} only in B",
+        changed + only_a + only_b
+    )?;
+    for l in lines.iter().take(SHOWN) {
+        writeln!(w, "{l}")?;
+    }
+    if lines.len() > SHOWN {
+        writeln!(w, "  and {} more", lines.len() - SHOWN)?;
+    }
+    if kept_order_differs {
+        writeln!(
+            w,
+            "the declarations both files hold are in another order too"
+        )?;
+    }
+    Ok(false)
 }

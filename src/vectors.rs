@@ -741,7 +741,7 @@ fn accepted_text(bytes: &[u8], index: bool) -> String {
     let f = read::File::open(bytes).expect("an accept vector opens");
     let c = f.counts;
     let d = crate::digest::of_susz(bytes)
-        .map(|d| format!("{d:016x}"))
+        .map(|d| crate::digest::hex(&d))
         .unwrap_or_else(|e| format!("error {e}"));
     let mut s = format!(
         "outcome accepted\ncounts {} {} {} {}\ndigest {d}\n",
