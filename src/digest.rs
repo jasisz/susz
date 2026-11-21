@@ -7,6 +7,11 @@
 //! packer's), so that comparing the two shows whether a Susz file holds the
 //! declarations of an export, and which declaration differs if not.
 //!
+//! Two views (spec 9.3, 9.4): [`View::Exact`] hashes everything a
+//! declaration says; [`View::Kernel`] leaves out what a kernel does not look
+//! at (binder names, binder info, the order of an inductive block's
+//! recursors), so two exports that differ only in that compare the same.
+//!
 //! Memory: one 16-byte hash for each name, level and expression id, in
 //! tables grown a page at a time (no copies on growth). With names asked
 //! for, the ndjson side also keeps each name's prefix and component.
@@ -48,6 +53,37 @@ pub mod tag {
     pub const OPAQUE: u8 = 0x43;
     pub const QUOT: u8 = 0x44;
     pub const INDUCTIVE: u8 = 0x45;
+    /// The kernel view's own nodes (spec 9.4): binders without their name
+    /// and binder info.
+    pub const K_LAM: u8 = 0x2a;
+    pub const K_FORALL: u8 = 0x2b;
+    pub const K_LET: u8 = 0x2c;
+    /// The kernel view's declarations: the exact tag plus this.
+    pub const K_DECL: u8 = 0x10;
+    /// A recursor of an inductive block, in the kernel view.
+    pub const K_REC: u8 = 0x56;
+}
+
+/// Which digest: the exact one (spec 9.3), or the kernel's view of the
+/// declarations (spec 9.4).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum View {
+    /// Everything a declaration says (spec 9.3).
+    #[default]
+    Exact,
+    /// What a kernel checks (spec 9.4): no binder names (`forallE`, `lam`,
+    /// `letE`), no binder info, and an inductive block's recursors as a set.
+    Kernel,
+}
+
+impl View {
+    /// How the CLI names it in its output: `""` or `" (kernel)"`.
+    pub fn label(self) -> &'static str {
+        match self {
+            View::Exact => "",
+            View::Kernel => " (kernel)",
+        }
+    }
 }
 
 /// The declaration kinds, as lean4export names them (a theorem whose proof
@@ -86,6 +122,7 @@ pub fn hex(b: &[u8]) -> String {
 /// Builds encodings in a reused buffer and hashes them.
 pub struct Enc {
     b: Vec<u8>,
+    kernel: bool,
 }
 
 impl Default for Enc {
@@ -112,9 +149,22 @@ fn put_nodes(b: &mut Vec<u8>, xs: &[Node]) {
 }
 
 impl Enc {
+    /// The exact view's encodings (spec 9.3).
     pub fn new() -> Enc {
+        Enc::with_view(View::Exact)
+    }
+    /// The encodings of `view`.
+    pub fn with_view(view: View) -> Enc {
         Enc {
             b: Vec::with_capacity(256),
+            kernel: view == View::Kernel,
+        }
+    }
+    pub fn view(&self) -> View {
+        if self.kernel {
+            View::Kernel
+        } else {
+            View::Exact
         }
     }
     #[inline]
@@ -195,8 +245,15 @@ impl Enc {
         self.done()
     }
     /// `lam`, or `forallE` when `pi` is true. Binder: 0 default,
-    /// 1 implicit, 2 strict implicit, 3 instance implicit.
+    /// 1 implicit, 2 strict implicit, 3 instance implicit. The kernel view
+    /// leaves out the binder and the name.
     pub fn binder(&mut self, pi: bool, bi: u8, n: &Node, t: &Node, body: &Node) -> Node {
+        if self.kernel {
+            let b = self.start(if pi { tag::K_FORALL } else { tag::K_LAM });
+            b.extend_from_slice(t);
+            b.extend_from_slice(body);
+            return self.done();
+        }
         let b = self.start(if pi { tag::FORALL } else { tag::LAM });
         b.push(bi);
         b.extend_from_slice(n);
@@ -204,7 +261,15 @@ impl Enc {
         b.extend_from_slice(body);
         self.done()
     }
+    /// `letE`. The kernel view leaves out the name.
     pub fn let_e(&mut self, n: &Node, t: &Node, v: &Node, body: &Node) -> Node {
+        if self.kernel {
+            let b = self.start(tag::K_LET);
+            b.extend_from_slice(t);
+            b.extend_from_slice(v);
+            b.extend_from_slice(body);
+            return self.done();
+        }
         let b = self.start(tag::LET);
         b.extend_from_slice(n);
         b.extend_from_slice(t);
@@ -385,11 +450,39 @@ fn put_rec(b: &mut Vec<u8>, r: &Rec) {
 }
 
 impl Enc {
+    /// A declaration's tag in this view.
+    fn decl_tag(&self, t: u8) -> u8 {
+        if self.kernel {
+            t + tag::K_DECL
+        } else {
+            t
+        }
+    }
+
     /// A declaration's digest: SHA-256 of its encoding, all 32 bytes.
     pub fn decl(&mut self, d: &DeclV) -> Hash {
+        // the kernel view: each recursor's node hash, sorted (spec 9.4)
+        let mut rec_set: Vec<Node> = Vec::new();
+        if let (true, DeclV::Inductive { recs, .. }) = (self.kernel, d) {
+            rec_set.reserve(recs.len());
+            for r in recs {
+                put_rec(self.start(tag::K_REC), r);
+                rec_set.push(self.done());
+            }
+            rec_set.sort_unstable();
+        }
+        let t = |x: u8| self.decl_tag(x);
+        let (t_ax, t_def, t_thm, t_op, t_quot, t_ind) = (
+            t(tag::AXIOM),
+            t(tag::DEF),
+            t(tag::THM),
+            t(tag::OPAQUE),
+            t(tag::QUOT),
+            t(tag::INDUCTIVE),
+        );
         match d {
             DeclV::Axiom { head, is_unsafe } => {
-                let b = self.start(tag::AXIOM);
+                let b = self.start(t_ax);
                 put_head(b, head);
                 b.push(*is_unsafe as u8);
             }
@@ -400,7 +493,7 @@ impl Enc {
                 safety,
                 all,
             } => {
-                let b = self.start(tag::DEF);
+                let b = self.start(t_def);
                 put_head(b, head);
                 b.extend_from_slice(value);
                 match hints {
@@ -415,7 +508,7 @@ impl Enc {
                 put_nodes(b, all);
             }
             DeclV::Thm { head, value, all } => {
-                let b = self.start(tag::THM);
+                let b = self.start(t_thm);
                 put_head(b, head);
                 b.extend_from_slice(value);
                 put_nodes(b, all);
@@ -426,19 +519,20 @@ impl Enc {
                 is_unsafe,
                 all,
             } => {
-                let b = self.start(tag::OPAQUE);
+                let b = self.start(t_op);
                 put_head(b, head);
                 b.extend_from_slice(value);
                 b.push(*is_unsafe as u8);
                 put_nodes(b, all);
             }
             DeclV::Quot { head, kind } => {
-                let b = self.start(tag::QUOT);
+                let b = self.start(t_quot);
                 put_head(b, head);
                 b.push(*kind);
             }
             DeclV::Inductive { types, ctors, recs } => {
-                let b = self.start(tag::INDUCTIVE);
+                let kernel = self.kernel;
+                let b = self.start(t_ind);
                 put_u64(b, types.len() as u64);
                 for t in types {
                     put_type(b, t);
@@ -447,9 +541,13 @@ impl Enc {
                 for c in ctors {
                     put_ctor(b, c);
                 }
-                put_u64(b, recs.len() as u64);
-                for r in recs {
-                    put_rec(b, r);
+                if kernel {
+                    put_nodes(b, &rec_set);
+                } else {
+                    put_u64(b, recs.len() as u64);
+                    for r in recs {
+                        put_rec(b, r);
+                    }
                 }
             }
         }
@@ -686,9 +784,19 @@ pub fn printable(name: &str) -> Cow<'_, str> {
 /// breaks it still holds its export's declarations (spec 2). With `names`,
 /// each entry carries its declaration's dotted name.
 pub fn susz(bytes: &[u8], names: bool, each: &mut Each<'_>) -> Result<Summary, Error> {
+    susz_view(bytes, View::Exact, names, each)
+}
+
+/// [`susz`] in either view.
+pub fn susz_view(
+    bytes: &[u8],
+    view: View,
+    names: bool,
+    each: &mut Each<'_>,
+) -> Result<Summary, Error> {
     let f = File::open(bytes)?;
     let mut m = f.main();
-    let mut enc = Enc::new();
+    let mut enc = Enc::with_view(view);
     let mut nm: Paged<Node> = Paged::new();
     let mut lv: Paged<Node> = Paged::new();
     let mut ex: Paged<Node> = Paged::new();
@@ -1988,9 +2096,19 @@ fn header(l: &[u8]) -> R<()> {
 /// The digest of an ndjson export (lean4export 3.1), read line by line from
 /// `r`. With `names`, each entry carries its declaration's dotted name, and
 /// the names' components are kept for that.
-pub fn ndjson<B: BufRead>(mut r: B, names: bool, each: &mut Each<'_>) -> Result<Summary, Error> {
+pub fn ndjson<B: BufRead>(r: B, names: bool, each: &mut Each<'_>) -> Result<Summary, Error> {
+    ndjson_view(r, View::Exact, names, each)
+}
+
+/// [`ndjson`] in either view.
+pub fn ndjson_view<B: BufRead>(
+    mut r: B,
+    view: View,
+    names: bool,
+    each: &mut Each<'_>,
+) -> Result<Summary, Error> {
     let mut nd = Nd {
-        enc: Enc::new(),
+        enc: Enc::with_view(view),
         names: Paged::new(),
         levels: Paged::new(),
         exprs: Paged::new(),
@@ -2118,6 +2236,150 @@ mod tests {
             hex(&sha(b"abc")),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    // The kernel view's nodes, byte for byte, and the spec's example (9.4):
+    // `fun (x : Nat) => x` with any binder name and binder info.
+    #[test]
+    fn kernel_encodings() {
+        let mut e = Enc::new();
+        let mut k = Enc::with_view(View::Kernel);
+        assert_eq!(k.view(), View::Kernel);
+        let a = e.anon();
+        let nat = e.name_str(&a, b"Nat");
+        let x = e.name_str(&a, b"x");
+        let y = e.name_str(&a, b"y");
+        // what the kernel view shares with the exact one
+        assert_eq!(k.name_str(&a, b"Nat"), nat);
+        e.const_start(&nat, 0);
+        let c = e.const_end();
+        k.const_start(&nat, 0);
+        assert_eq!(k.const_end(), c);
+        let v = e.bvar(0);
+        assert_eq!(k.bvar(0), v);
+        assert_eq!(hex(&c), "e3af5a8ee0166bc38c922f6f183a7e1d");
+        // lam: 2a, type, body
+        let mut b = vec![tag::K_LAM];
+        b.extend_from_slice(&c);
+        b.extend_from_slice(&v);
+        let lam = k.binder(false, 0, &x, &c, &v);
+        assert_eq!(lam, node(&b));
+        assert_eq!(hex(&lam), "e4265d6a97e21249b25637451d17621e");
+        for bi in 0..4 {
+            assert_eq!(k.binder(false, bi, &y, &c, &v), lam);
+        }
+        assert_ne!(k.binder(true, 0, &x, &c, &v), lam);
+        // the exact view keeps them
+        assert_eq!(
+            hex(&e.binder(false, 0, &x, &c, &v)),
+            "e3d53cb12a1829152fe919aa0a80ac9d"
+        );
+        assert_ne!(
+            e.binder(false, 0, &x, &c, &v),
+            e.binder(false, 0, &y, &c, &v)
+        );
+        assert_ne!(
+            e.binder(false, 0, &x, &c, &v),
+            e.binder(false, 1, &x, &c, &v)
+        );
+        // letE: 2c, type, value, body
+        let mut b = vec![tag::K_LET];
+        for h in [&c, &v, &v] {
+            b.extend_from_slice(h);
+        }
+        assert_eq!(k.let_e(&x, &c, &v, &v), node(&b));
+        assert_eq!(k.let_e(&y, &c, &v, &v), node(&b));
+        // a declaration: its exact tag plus 0x10, so the two views never
+        // give one declaration the same digest
+        let head = Head {
+            name: nat,
+            params: vec![],
+            ty: c,
+        };
+        let ax = DeclV::Axiom {
+            head: head.clone(),
+            is_unsafe: false,
+        };
+        let mut b = vec![0x50];
+        b.extend_from_slice(&nat);
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b.extend_from_slice(&c);
+        b.push(0);
+        assert_eq!(k.decl(&ax), sha(&b));
+        b[0] = 0x40;
+        assert_eq!(e.decl(&ax), sha(&b));
+    }
+
+    // The kernel view hashes an inductive block's recursors as a set: the
+    // sorted node hashes of their encodings (tag 0x56).
+    #[test]
+    fn kernel_recursors_are_a_set() {
+        let mut e = Enc::new();
+        let mut k = Enc::with_view(View::Kernel);
+        let a = e.anon();
+        let nm = |e: &mut Enc, s: &str| e.name_str(&a, s.as_bytes());
+        let z = e.zero();
+        let ty = e.sort(&z);
+        let rec = |e: &mut Enc, s: &str, nf: u64| Rec {
+            head: Head {
+                name: nm(e, s),
+                params: vec![],
+                ty,
+            },
+            is_unsafe: false,
+            all: vec![],
+            num_params: 0,
+            num_indices: 0,
+            num_motives: 1,
+            num_minors: 1,
+            rules: vec![RecRule {
+                ctor: a,
+                nfields: nf,
+                rhs: ty,
+            }],
+            k: false,
+        };
+        let block = |e: &mut Enc, order: &[usize]| {
+            let rs = [
+                rec(e, "I.rec", 0),
+                rec(e, "I.rec_1", 1),
+                rec(e, "I.rec_2", 2),
+            ];
+            let mut v = Vec::new();
+            let mut rs: Vec<Option<Rec>> = rs.into_iter().map(Some).collect();
+            for &i in order {
+                v.push(rs[i].take().unwrap());
+            }
+            DeclV::Inductive {
+                types: vec![],
+                ctors: vec![],
+                recs: v,
+            }
+        };
+        let d0 = block(&mut e, &[0, 1, 2]);
+        let d1 = block(&mut e, &[0, 2, 1]);
+        let d2 = block(&mut e, &[2, 1, 0]);
+        assert_ne!(e.decl(&d0), e.decl(&d1));
+        assert_eq!(k.decl(&d0), k.decl(&d1));
+        assert_eq!(k.decl(&d0), k.decl(&d2));
+        // by hand: 55, no type, no ctor, the sorted recursor nodes
+        let DeclV::Inductive { recs, .. } = &d0 else {
+            unreachable!()
+        };
+        let mut ns: Vec<Node> = recs
+            .iter()
+            .map(|r| {
+                let mut b = vec![tag::K_REC];
+                put_rec(&mut b, r);
+                node(&b)
+            })
+            .collect();
+        ns.sort();
+        let mut b = vec![0x55];
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        put_nodes(&mut b, &ns);
+        assert_eq!(k.decl(&d0), sha(&b));
     }
 
     fn nd(text: &str) -> Result<Hash, String> {

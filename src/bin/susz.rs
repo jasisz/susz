@@ -12,8 +12,8 @@ const USAGE: &str = "usage:
              [--no-index] [--threads N] [--quiet]
   susz axioms FILE.susz [--root NAME]... [--roots-file FILE] [--prefix NS]...
               [--all] [--threads N] [--quiet]
-  susz digest FILE [--each]
-  susz digest A B
+  susz digest FILE [--each] [--kernel]
+  susz digest A B [--kernel]
 
 pack uses all cores unless --threads N is given; the output is the same.
 pack exits 0 when OUT is written, 1 when IN is not a valid export,
@@ -44,8 +44,12 @@ and the export it was packed from give the same digest, and so do two
 exports that differ only in ids, layout, mdata or letE's nondep. With
 --each it first prints one line per declaration, in file order:
 DIGEST KIND NAME. With two files it compares them, and names the first
-declarations that differ. It exits 0 printed (or the same), 1 different,
-2 when a file is malformed, not a valid export, declined, unreadable or I/O.";
+declarations that differ. With --kernel it computes the kernel digest
+(spec 9.4) instead, what a kernel checks: binder names (forallE, lam,
+letE) and binder info do not count, nor the order of an inductive block's
+recursors; the output says (kernel). It exits 0 printed (or the same),
+1 different, 2 when a file is malformed, not a valid export, declined,
+unreadable or I/O.";
 
 extern "C" {
     fn _exit(code: i32) -> !;
@@ -513,6 +517,7 @@ struct Got {
 // is stdin. `each` sees every declaration; `names` asks for their names.
 fn digest_of(
     path: &str,
+    view: susz::digest::View,
     names: bool,
     each: &mut susz::digest::Each<'_>,
 ) -> Result<(susz::digest::Summary, bool), susz::digest::Error> {
@@ -530,20 +535,21 @@ fn digest_of(
         if first == magic {
             let mut bytes = first;
             stdin.read_to_end(&mut bytes)?;
-            return susz::digest::susz(&bytes, names, each).map(|s| (s, true));
+            return susz::digest::susz_view(&bytes, view, names, each).map(|s| (s, true));
         }
         let r = BufReader::with_capacity(1 << 20, std::io::Cursor::new(first).chain(stdin));
-        return susz::digest::ndjson(r, names, each).map(|s| (s, false));
+        return susz::digest::ndjson_view(r, view, names, each).map(|s| (s, false));
     }
     let mut f = std::fs::File::open(path)?;
     if head(&mut f)? == magic {
         drop(f);
         let bytes = read_file(path);
-        return susz::digest::susz(&bytes, names, each).map(|s| (s, true));
+        return susz::digest::susz_view(&bytes, view, names, each).map(|s| (s, true));
     }
     use std::io::Seek;
     f.rewind()?;
-    susz::digest::ndjson(BufReader::with_capacity(1 << 20, f), names, each).map(|s| (s, false))
+    susz::digest::ndjson_view(BufReader::with_capacity(1 << 20, f), view, names, each)
+        .map(|s| (s, false))
 }
 
 fn digest_failed(path: &str, e: susz::digest::Error) -> ! {
@@ -573,10 +579,12 @@ fn cmd_digest(args: &[String]) {
     use std::io::Write;
     use susz::digest::{hex, printable, KINDS};
     let mut each = false;
+    let mut view = susz::digest::View::Exact;
     let mut files = Vec::new();
     for a in args {
         match a.as_str() {
             "--each" => each = true,
+            "--kernel" => view = susz::digest::View::Kernel,
             "-" => files.push(a.clone()),
             a if a.starts_with('-') => usage(),
             a => files.push(a.to_string()),
@@ -600,14 +608,14 @@ fn cmd_digest(args: &[String]) {
             )
         };
         let res = if each {
-            digest_of(path, true, &mut line)
+            digest_of(path, view, true, &mut line)
         } else {
-            digest_of(path, false, &mut |_| Ok(()))
+            digest_of(path, view, false, &mut |_| Ok(()))
         };
         drop(line);
         let (s, form) = res.unwrap_or_else(|e| digest_failed(path, e));
         digest_counts(path, &s, form);
-        let res = writeln!(w, "{}", hex(&s.digest))
+        let res = writeln!(w, "{}{}", hex(&s.digest), view.label())
             .and_then(|()| writeln!(w, "{}", s.declarations_line()))
             .and_then(|()| w.flush());
         if let Err(e) = res {
@@ -621,7 +629,7 @@ fn cmd_digest(args: &[String]) {
     for path in &files {
         let mut digests = Vec::new();
         let mut names = Vec::new();
-        let (s, form) = digest_of(path, true, &mut |e| {
+        let (s, form) = digest_of(path, view, true, &mut |e| {
             digests.push(e.digest);
             names.push(e.name.to_string());
             Ok(())
@@ -636,7 +644,7 @@ fn cmd_digest(args: &[String]) {
     }
     let (a, b) = (&got[0], &got[1]);
     let mut w = std::io::BufWriter::new(out.lock());
-    let res = digest_compare(&mut w, a, b).and_then(|same| {
+    let res = digest_compare(&mut w, view, a, b).and_then(|same| {
         w.flush()?;
         Ok(same)
     });
@@ -655,16 +663,28 @@ const SHOWN: usize = 10;
 
 // Writes the comparison; true when the two files hold the same declarations
 // in the same order.
-fn digest_compare(w: &mut impl std::io::Write, a: &Got, b: &Got) -> std::io::Result<bool> {
+fn digest_compare(
+    w: &mut impl std::io::Write,
+    view: susz::digest::View,
+    a: &Got,
+    b: &Got,
+) -> std::io::Result<bool> {
     use std::collections::HashMap;
     use susz::digest::{hex, printable};
+    let label = view.label();
     if a.sum.digest == b.sum.digest {
-        writeln!(w, "same: {}", hex(&a.sum.digest))?;
+        writeln!(w, "same{label}: {}", hex(&a.sum.digest))?;
         writeln!(w, "{}", a.sum.declarations_line())?;
         return Ok(true);
     }
-    writeln!(w, "different: A {}", hex(&a.sum.digest))?;
-    writeln!(w, "           B {}", hex(&b.sum.digest))?;
+    writeln!(w, "different{label}: A {}", hex(&a.sum.digest))?;
+    writeln!(
+        w,
+        "{:width$}B {}",
+        "",
+        hex(&b.sum.digest),
+        width = "different: ".len() + label.len()
+    )?;
     writeln!(w, "A: {}", a.sum.declarations_line())?;
     writeln!(w, "B: {}", b.sum.declarations_line())?;
     // each side's declarations that the other one does not hold (as a
