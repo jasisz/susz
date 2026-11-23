@@ -552,7 +552,8 @@ them.
 
 - `mdata`. The metadata map is dropped and the record is not written. A
   reference to an `mdata` expression is written as a reference to the
-  expression it wraps (A.7).
+  expression it wraps (A.7). A packer reads an `mdata` record with or without
+  its `data` key (lean4export writes it, some other exporters do not).
 - `letE.nondep`, which only elaboration uses.
 - The export's own numeric ids (`in`, `il`, `ie`). Susz numbers items itself,
   and MAIN expression ids differ from the export's.

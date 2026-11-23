@@ -1379,6 +1379,13 @@ impl Keys {
         self.seen |= 1 << i;
         Ok(i)
     }
+    /// The wanted key at index `i` was seen.
+    fn need(&self, i: usize) -> R<()> {
+        if self.seen >> i & 1 == 0 {
+            return Err(inv(format!("missing key '{}'", self.want[i])));
+        }
+        Ok(())
+    }
     fn all(&self) -> R<()> {
         for (i, w) in self.want.iter().enumerate() {
             if self.seen >> i & 1 == 0 {
@@ -1686,7 +1693,8 @@ impl Nd {
                     }
                     Ok(())
                 })?;
-                keys.all()?;
+                // `data` may be absent (as the packer reads it)
+                keys.need(0)?;
                 Line::Expr(self.expr(e)?, true)
             }
             // declarations
