@@ -41,5 +41,9 @@ debug = false
 name = "gen-vectors"
 path = "examples/gen_vectors.rs"
 
+[[example]]
+name = "pack-records"
+path = "examples/pack_records.rs"
+
 [dev-dependencies]
 flate2 = "1.1.11"
