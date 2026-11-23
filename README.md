@@ -334,6 +334,46 @@ unless an earlier lookup already went that far. For a declaration near the
 end of mathlib that is nearly all of MAIN. `susz::index::lookup` does one
 lookup from scratch.
 
+### Packing from records
+
+A program that already holds the records, such as an exporter reading
+`.olean` files, does not have to write ndjson for `pack` to read again. It
+hands the records to a `susz::pack::Packer` one at a time: the header first
+(`meta`), then names, levels, expressions and declarations, each through the
+method named after its ndjson record, with lean4export's ids. The packer
+checks what `pack` checks, and the file is byte for byte the one `pack`
+writes from the same records as ndjson.
+
+```rust
+use susz::pack::{Binder, Decl, Head, Options, Packer};
+
+// theorem id_p : ∀ (p : Prop), p → p := fun p h => h
+let mut p = Packer::new();
+p.meta(r#"{"exporter":{"name":"me","version":"0"},"format":{"version":"3.1.0"}}"#)?;
+p.name_str(1, 0, "id_p")?;
+p.name_str(2, 0, "p")?;
+p.name_str(3, 0, "h")?;
+p.sort(0, 0)?; // Prop
+p.bvar(1, 0)?;
+p.bvar(2, 1)?;
+p.pi(3, Binder::Default, 3, 1, 2)?; // (h : p) → p
+p.pi(4, Binder::Default, 2, 0, 3)?; // ∀ (p : Prop), p → p
+p.lam(5, Binder::Default, 3, 1, 1)?; // fun (h : p) => h
+p.lam(6, Binder::Default, 2, 0, 5)?; // fun (p : Prop) (h : p) => h
+p.decl(&Decl::Thm {
+    head: Head { name: 1, level_params: vec![], ty: 4 },
+    value: 6,
+    all: vec![1],
+})?;
+let stats = p.write_file("id_p.susz", &Options::default())?;
+```
+
+The whole program is [examples/pack_records.rs](examples/pack_records.rs):
+`cargo run --example pack-records -- id_p.susz`. Nat literals go in as
+decimal (`nat_decimal`) or as little-endian bytes (`nat_le`), whichever the
+producer holds. [susz-olean](https://github.com/jasisz/susz-olean) packs
+`.olean` files this way.
+
 ### Memory-mapped files
 
 The reader only wants a `&[u8]`, so a memory-mapped file works as well as one

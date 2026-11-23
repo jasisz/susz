@@ -27,19 +27,24 @@ pub enum Fault {
     Cannot,
 }
 
+/// Why packing failed.
 #[derive(Debug, Clone)]
 pub struct PackError {
+    /// Whose fault it is.
     pub fault: Fault,
+    /// What went wrong, and where when it is known.
     pub msg: String,
 }
 
 impl PackError {
+    /// The input is not a valid export.
     pub fn invalid(msg: impl Into<String>) -> PackError {
         PackError {
             fault: Fault::Invalid,
             msg: msg.into(),
         }
     }
+    /// This packer cannot pack the input.
     pub fn cannot(msg: impl Into<String>) -> PackError {
         PackError {
             fault: Fault::Cannot,
@@ -74,6 +79,7 @@ impl fmt::Display for PackError {
 
 impl std::error::Error for PackError {}
 
+/// A packing result.
 pub type R<T> = Result<T, PackError>;
 
 macro_rules! inv {
@@ -161,18 +167,29 @@ impl Default for Options {
 /// What a packing run wrote.
 #[derive(Debug, Clone, Default)]
 pub struct Stats {
-    /// Names and levels with their implicit id 0, as the trailer counts them.
+    /// Names, with the implicit id 0, as the trailer counts them.
     pub names: u64,
+    /// Levels, with the implicit id 0, as the trailer counts them.
     pub levels: u64,
+    /// Expressions, in MAIN and in proof blocks.
     pub exprs: u64,
+    /// Expressions in MAIN.
     pub main_exprs: u64,
+    /// Declarations.
     pub decls: u64,
+    /// Proof blocks.
     pub blocks: u64,
+    /// Bytes of the MAIN section.
     pub main_bytes: u64,
+    /// Bytes of the PROOFS section.
     pub proofs_bytes: u64,
+    /// Bytes of the INDEX section.
     pub index_bytes: u64,
+    /// Bytes of the SOURCE section.
     pub source_bytes: u64,
+    /// Bytes of the whole file.
     pub file_bytes: u64,
+    /// Whether the input was read on several workers.
     pub parallel: bool,
 }
 
