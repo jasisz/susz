@@ -268,6 +268,15 @@ pub fn ints(fs: &[(Vec<u8>, J)], key: &str) -> R<Vec<u64>> {
 // invalid, a repeated key too, a key this packer does not know makes it
 // refuse the line (spec 9.1: never drop a field silently).
 pub fn exact(fs: &[(Vec<u8>, J)], keys: &[&str]) -> R<()> {
+    only(fs, keys)?;
+    for k in keys {
+        need(fs, k)?;
+    }
+    Ok(())
+}
+
+// Every key one of `keys`, none twice (a key may be absent).
+pub fn only(fs: &[(Vec<u8>, J)], keys: &[&str]) -> R<()> {
     for (i, (k, _)) in fs.iter().enumerate() {
         if !keys.iter().any(|x| x.as_bytes() == k.as_slice()) {
             return Err(cant!("unknown key '{}'", String::from_utf8_lossy(k)));
@@ -275,9 +284,6 @@ pub fn exact(fs: &[(Vec<u8>, J)], keys: &[&str]) -> R<()> {
         if fs[..i].iter().any(|(j, _)| j == k) {
             return Err(inv!("key '{}' given twice", String::from_utf8_lossy(k)));
         }
-    }
-    for k in keys {
-        need(fs, k)?;
     }
     Ok(())
 }

@@ -915,7 +915,9 @@ impl Pk {
         }
         if json::has(fs, "mdata") {
             let o = json::obj(fs, "mdata")?;
-            json::exact(o, &["data", "expr"])?;
+            // lean4export writes `data`; other exporters (olean-export) leave it
+            // out, and it is dropped either way (spec 9.1)
+            json::only(o, &["data", "expr"])?;
             return self.mdata(ie, json::int(o, "expr")?);
         }
         Err(cant!("unknown expression kind"))

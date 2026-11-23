@@ -13,9 +13,10 @@ rust-version = "1.85"
 
 [dependencies]
 # Nat literals converted between decimal and binary by divide and conquer
-# instead of digit by digit, which is quadratic: some exports (CFSG's
-# certificates) hold literals of millions of digits.
-malachite-nz = "0.6"
+# (dashu-int: subquadratic parsing and formatting) instead of digit by digit,
+# which is quadratic: some exports (CFSG's certificates) hold literals of
+# millions of digits.
+dashu-int = { version = "=0.6.2", default-features = false }
 # The digest (susz digest): SHA-256 with the CPU's SHA instructions where
 # there are some (ARMv8, x86 SHA-NI), detected at run time. 0.10 hashes in
 # software on aarch64: 364 ns a node against 19 ns on an M2 Pro.

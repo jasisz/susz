@@ -293,6 +293,37 @@ fn mdata_is_dropped() {
     );
 }
 
+// mdata without `data` (as olean-export writes it) packs and digests as with
+// it; without `expr` it is not an export.
+#[test]
+fn mdata_data_may_be_absent() {
+    let head = "{\"meta\":{\"format\":{\"version\":\"3.1.0\"}}}\n\
+{\"in\":1,\"str\":{\"pre\":0,\"str\":\"A\"}}\n\
+{\"ie\":0,\"sort\":0}\n";
+    let tail = "{\"axiom\":{\"isUnsafe\":false,\"levelParams\":[],\"name\":1,\"type\":1}}\n";
+    let with = format!("{head}{{\"ie\":1,\"mdata\":{{\"data\":{{\"x\":1}},\"expr\":0}}}}\n{tail}");
+    let without = format!("{head}{{\"ie\":1,\"mdata\":{{\"expr\":0}}}}\n{tail}");
+    let no_expr = format!("{head}{{\"ie\":1,\"mdata\":{{\"data\":{{}}}}}}\n{tail}");
+    let (pa, pb, pc) = (
+        tmp("mdata-with.ndjson"),
+        tmp("mdata-without.ndjson"),
+        tmp("mdata-no-expr.ndjson"),
+    );
+    std::fs::write(&pa, with).unwrap();
+    std::fs::write(&pb, without).unwrap();
+    std::fs::write(&pc, no_expr).unwrap();
+    let (x, _) = pack_to_vec(&pa, &opts(true, 1)).unwrap();
+    let (y, _) = pack_to_vec(&pb, &opts(true, 1)).unwrap();
+    assert!(x == y);
+    assert_eq!(
+        susz::digest::of_ndjson(&pb).unwrap(),
+        susz::digest::of_susz(&y).unwrap()
+    );
+    let e = pack_to_vec(&pc, &opts(true, 1)).unwrap_err();
+    assert_eq!(e.fault, susz::pack::Fault::Invalid);
+    assert!(susz::digest::of_ndjson(&pc).is_err());
+}
+
 // Lines in lean4export's canonical form are read by position, any other
 // through the JSON parser: an export written otherwise (other spacing or key
 // order, escapes, leading zeros, long names) packs to the same bytes.
