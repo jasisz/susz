@@ -230,36 +230,22 @@ fn nat_to_decimal_schoolbook(bytes: &[u8]) -> String {
     s
 }
 
-/// Divide and conquer (malachite) for literals past a machine word.
+/// Divide and conquer (dashu-int: subquadratic parsing and formatting) for
+/// literals past a machine word.
 mod fast_nat {
-    use malachite_nz::natural::Natural;
+    use dashu_int::UBig;
 
     pub(super) fn from_decimal(digits: &[u8]) -> Option<Vec<u8>> {
         if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
             return None;
         }
-        let n: Natural = core::str::from_utf8(digits).ok()?.parse().ok()?;
-        let mut out: Vec<u8> = n
-            .to_limbs_asc()
-            .iter()
-            .flat_map(|l| l.to_le_bytes())
-            .collect();
-        while out.last() == Some(&0) {
-            out.pop();
-        }
-        Some(out)
+        let n = UBig::from_str_radix(core::str::from_utf8(digits).ok()?, 10).ok()?;
+        // minimal: no trailing zero bytes, and zero is empty
+        Some(n.to_le_bytes().into_vec())
     }
 
     pub(super) fn to_decimal(bytes: &[u8]) -> String {
-        let limbs: Vec<u64> = bytes
-            .chunks(8)
-            .map(|c| {
-                let mut t = [0u8; 8];
-                t[..c.len()].copy_from_slice(c);
-                u64::from_le_bytes(t)
-            })
-            .collect();
-        Natural::from_limbs_asc(&limbs).to_string()
+        UBig::from_le_bytes(bytes).to_string()
     }
 }
 
@@ -282,11 +268,13 @@ mod tests {
             "18446744073709551615",
             "18446744073709551616",
             "99999999999999999999",
+            "0000000000000000000000000",
+            "0000000000000000000000000000000000000000001",
         ]
         .iter()
         .map(|d| d.to_string())
         .collect();
-        for n in [20, 40, 400, 5000] {
+        for n in [20, 40, 400, 5000, 60000] {
             cases.push(
                 (0..n)
                     .map(|_| char::from(b'0' + (next() % 10) as u8))
