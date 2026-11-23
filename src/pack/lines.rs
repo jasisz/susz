@@ -520,28 +520,8 @@ impl Reader {
         Ok(())
     }
 
-    // {"meta":M}: M is kept byte for byte (SOURCE). The object must be
-    // written exactly so, without spaces around the one key, to be kept.
     fn header(&mut self, pk: &mut Pk, l: &[u8]) -> R<()> {
-        std::str::from_utf8(l).map_err(|e| format!("not UTF-8: {e}"))?;
-        let j = json::parse(l)?;
-        let J::Obj(fs) = j else {
-            return Err("the header is not an object".into());
-        };
-        let meta = json::obj(&fs, "meta")?;
-        json::exact(&fs, &["meta"])?;
-        let v = json::text(json::obj(meta, "format")?, "version")?;
-        if !v.starts_with(b"3.1.") {
-            return Err(cant!(
-                "format version {} is not supported",
-                String::from_utf8_lossy(v)
-            ));
-        }
-        if !(l.starts_with(b"{\"meta\":") && l.ends_with(b"}")) {
-            return Err(cant!("the header is not in the form {{\"meta\":...}}"));
-        }
-        pk.meta = l[8..l.len() - 1].to_vec();
-        Ok(())
+        pk.header(l)
     }
 
     #[inline(never)]

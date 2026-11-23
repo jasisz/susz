@@ -2,6 +2,7 @@
 // of expressions, the stream of other records, names made canonical, owners
 // seeded by declarations.
 
+use super::api::{Decl, Head, Hints, IndCtor, IndRec, IndRule, IndType, QuotKind, Safety};
 use super::json::{self, J};
 use super::{cant, inv, R};
 use crate::canon::Canon;
@@ -433,13 +434,36 @@ impl Pk {
         if e == MAX_EXPRS {
             return Err(cant!("more than 2^32 - 1 expressions"));
         }
-        self.er.define(ie, e, "expression")?;
         if e as u64 >= self.colcap {
-            return Err(cant!("more expressions than the file can hold"));
+            self.grow_cols()?;
         }
+        self.er.define(ie, e, "expression")?;
         self.exprs = e + 1;
         self.run += 1;
         Ok(e)
+    }
+    // Past the room reserved: a worker's columns are shared and cannot move;
+    // on one worker (records handed over one by one) they grow.
+    #[inline(never)]
+    fn grow_cols(&mut self) -> R<()> {
+        if self.worker {
+            return Err(cant!("more expressions than the file can hold"));
+        }
+        let n = self.exprs as usize;
+        let cap = (self.colcap as usize).max(1 << 16) * 2;
+        unsafe {
+            self.cols.k.set_len(n);
+            self.cols.a.set_len(n);
+            self.cols.b.set_len(n);
+        }
+        self.cols.k.reserve_exact(cap - n);
+        self.cols.a.reserve_exact(cap - n);
+        self.cols.b.reserve_exact(cap - n);
+        self.kp = self.cols.k.as_mut_ptr();
+        self.ap = self.cols.a.as_mut_ptr();
+        self.bp = self.cols.b.as_mut_ptr();
+        self.colcap = cap as u64;
+        Ok(())
     }
     #[inline(always)]
     fn new_expr(&mut self, ie: u64, k: u32, a: u32, b: u32) -> R<()> {
@@ -755,6 +779,8 @@ impl Pk {
         Ok(())
     }
 
+    // The line forms read without the JSON parser (lines.rs, slice.rs): the
+    // same encoding as `decl`, without building a `Decl`.
     pub fn thm(&mut self, name: u64, params: &[u64], ty: u64, v: u64, all: &[u64]) -> R<()> {
         self.check_decls()?;
         self.d_start();
@@ -788,6 +814,145 @@ impl Pk {
         self.dbyte(safety);
         self.dnms(all)?;
         self.d_end(1);
+        Ok(())
+    }
+
+    fn head(&mut self, h: &Head) -> R<()> {
+        self.dhead(h.name, &h.level_params, h.ty)
+    }
+
+    // A declaration (spec section 9: its fields in the order written).
+    pub fn decl(&mut self, d: &Decl) -> R<()> {
+        self.check_decls()?;
+        self.d_start();
+        let kind = match d {
+            Decl::Axiom { head, is_unsafe } => {
+                self.head(head)?;
+                self.dbyte(*is_unsafe as u8);
+                0
+            }
+            Decl::Def {
+                head,
+                value,
+                hints,
+                safety,
+                all,
+            } => {
+                self.head(head)?;
+                self.dref(*value, false)?;
+                match hints {
+                    Hints::Opaque => self.dbyte(0),
+                    Hints::Abbrev => self.dbyte(1),
+                    Hints::Regular(h) => {
+                        self.dbyte(2);
+                        self.dv(*h);
+                    }
+                }
+                self.dbyte(match safety {
+                    Safety::Safe => 0,
+                    Safety::Unsafe => 1,
+                    Safety::Partial => 2,
+                });
+                self.dnms(all)?;
+                1
+            }
+            Decl::Thm { head, value, all } => {
+                self.head(head)?;
+                self.dref(*value, true)?;
+                self.dnms(all)?;
+                2
+            }
+            Decl::Opaque {
+                head,
+                value,
+                is_unsafe,
+                all,
+            } => {
+                self.head(head)?;
+                self.dref(*value, false)?;
+                self.dbyte(*is_unsafe as u8);
+                self.dnms(all)?;
+                3
+            }
+            Decl::Quot { head, kind } => {
+                self.head(head)?;
+                self.dbyte(match kind {
+                    QuotKind::Type => 0,
+                    QuotKind::Ctor => 1,
+                    QuotKind::Lift => 2,
+                    QuotKind::Ind => 3,
+                });
+                4
+            }
+            Decl::Inductive { types, ctors, recs } => {
+                self.dv(types.len() as u64);
+                for t in types {
+                    self.head(&t.head)?;
+                    self.dbyte(t.is_unsafe as u8);
+                    self.dv(t.num_params);
+                    self.dv(t.num_indices);
+                    self.dnms(&t.all)?;
+                    self.dnms(&t.ctors)?;
+                    self.dv(t.num_nested);
+                    self.dbyte(t.is_rec as u8);
+                    self.dbyte(t.is_reflexive as u8);
+                }
+                self.dv(ctors.len() as u64);
+                for c in ctors {
+                    self.head(&c.head)?;
+                    self.dbyte(c.is_unsafe as u8);
+                    let ind = self.nm(c.induct)?;
+                    self.dv(ind as u64);
+                    self.dv(c.cidx);
+                    self.dv(c.num_params);
+                    self.dv(c.num_fields);
+                }
+                self.dv(recs.len() as u64);
+                for r in recs {
+                    self.head(&r.head)?;
+                    self.dbyte(r.is_unsafe as u8);
+                    self.dnms(&r.all)?;
+                    self.dv(r.num_params);
+                    self.dv(r.num_indices);
+                    self.dv(r.num_motives);
+                    self.dv(r.num_minors);
+                    self.dv(r.rules.len() as u64);
+                    for x in &r.rules {
+                        let c = self.nm(x.ctor)?;
+                        self.dv(c as u64);
+                        self.dv(x.nfields);
+                        self.dref(x.rhs, false)?;
+                    }
+                    self.dbyte(r.k as u8);
+                }
+                5
+            }
+        };
+        self.d_end(kind);
+        Ok(())
+    }
+
+    // {"meta":M}: M is kept byte for byte (SOURCE). The object must be
+    // written exactly so, without spaces around the one key, to be kept.
+    pub fn header(&mut self, l: &[u8]) -> R<()> {
+        std::str::from_utf8(l).map_err(|e| format!("not UTF-8: {e}"))?;
+        let j = json::parse(l)?;
+        let J::Obj(fs) = j else {
+            return Err("the header is not an object".into());
+        };
+        let meta = json::obj(&fs, "meta")?;
+        json::exact(&fs, &["meta"])?;
+        let v = json::text(json::obj(meta, "format")?, "version")?;
+        if !v.starts_with(b"3.1.") {
+            return Err(cant!(
+                "format version {} is not supported",
+                String::from_utf8_lossy(v)
+            ));
+        }
+        if !(l.starts_with(b"{\"meta\":") && l.ends_with(b"}")) {
+            return Err(cant!("the header is not in the form {{\"meta\":...}}"));
+        }
+        self.meta = l[8..l.len() - 1].to_vec();
         Ok(())
     }
 
@@ -923,24 +1088,23 @@ impl Pk {
         Err(cant!("unknown expression kind"))
     }
 
-    fn head_obj(&mut self, o: &[(Vec<u8>, J)]) -> R<()> {
-        let name = json::int(o, "name")?;
-        let ps = json::ints(o, "levelParams")?;
-        let ty = json::int(o, "type")?;
-        self.dhead(name, &ps, ty)
+    fn head_obj(o: &[(Vec<u8>, J)]) -> R<Head> {
+        Ok(Head {
+            name: json::int(o, "name")?,
+            level_params: json::ints(o, "levelParams")?,
+            ty: json::int(o, "type")?,
+        })
     }
 
     pub(crate) fn decl_obj(&mut self, k: &[u8], o: &[(Vec<u8>, J)]) -> R<()> {
         self.check_decls()?;
-        match k {
+        let d = match k {
             b"axiom" => {
                 json::exact(o, &["isUnsafe", "levelParams", "name", "type"])?;
-                self.d_start();
-                self.head_obj(o)?;
-                let u = json::boolean(o, "isUnsafe")?;
-                self.dbyte(u as u8);
-                self.d_end(0);
-                Ok(())
+                Decl::Axiom {
+                    head: Self::head_obj(o)?,
+                    is_unsafe: json::boolean(o, "isUnsafe")?,
+                }
             }
             b"def" => {
                 json::exact(
@@ -955,76 +1119,68 @@ impl Pk {
                         "value",
                     ],
                 )?;
-                let (hk, h) = match json::need(o, "hints")? {
-                    J::Str(s) if s.as_slice() == b"opaque" => (0u8, 0u64),
-                    J::Str(s) if s.as_slice() == b"abbrev" => (1, 0),
+                let hints = match json::need(o, "hints")? {
+                    J::Str(s) if s.as_slice() == b"opaque" => Hints::Opaque,
+                    J::Str(s) if s.as_slice() == b"abbrev" => Hints::Abbrev,
                     J::Obj(fs) => {
                         json::exact(fs, &["regular"])?;
-                        (2, json::int(fs, "regular")?)
+                        Hints::Regular(json::int(fs, "regular")?)
                     }
                     J::Str(_) => return Err(cant!("unknown hints")),
                     _ => return Err("malformed hints".into()),
                 };
-                let s = match json::text(o, "safety")? {
-                    b"safe" => 0u8,
-                    b"unsafe" => 1,
-                    b"partial" => 2,
+                let safety = match json::text(o, "safety")? {
+                    b"safe" => Safety::Safe,
+                    b"unsafe" => Safety::Unsafe,
+                    b"partial" => Safety::Partial,
                     x => return Err(cant!("unknown safety '{}'", String::from_utf8_lossy(x))),
                 };
-                let name = json::int(o, "name")?;
-                let ps = json::ints(o, "levelParams")?;
-                let ty = json::int(o, "type")?;
-                let v = json::int(o, "value")?;
-                let all = json::ints(o, "all")?;
-                self.defn(name, &ps, ty, v, hk, h, s, &all)
+                Decl::Def {
+                    head: Self::head_obj(o)?,
+                    value: json::int(o, "value")?,
+                    hints,
+                    safety,
+                    all: json::ints(o, "all")?,
+                }
             }
             b"thm" => {
                 json::exact(o, &["all", "levelParams", "name", "type", "value"])?;
-                let name = json::int(o, "name")?;
-                let ps = json::ints(o, "levelParams")?;
-                let ty = json::int(o, "type")?;
-                let v = json::int(o, "value")?;
-                let all = json::ints(o, "all")?;
-                self.thm(name, &ps, ty, v, &all)
+                Decl::Thm {
+                    head: Self::head_obj(o)?,
+                    value: json::int(o, "value")?,
+                    all: json::ints(o, "all")?,
+                }
             }
             b"opaque" => {
                 json::exact(
                     o,
                     &["all", "isUnsafe", "levelParams", "name", "type", "value"],
                 )?;
-                self.d_start();
-                self.head_obj(o)?;
-                self.dref(json::int(o, "value")?, false)?;
-                let u = json::boolean(o, "isUnsafe")?;
-                self.dbyte(u as u8);
-                let all = json::ints(o, "all")?;
-                self.dnms(&all)?;
-                self.d_end(3);
-                Ok(())
+                Decl::Opaque {
+                    head: Self::head_obj(o)?,
+                    value: json::int(o, "value")?,
+                    is_unsafe: json::boolean(o, "isUnsafe")?,
+                    all: json::ints(o, "all")?,
+                }
             }
             b"quot" => {
                 json::exact(o, &["kind", "levelParams", "name", "type"])?;
-                self.d_start();
-                self.head_obj(o)?;
-                let kb = match json::text(o, "kind")? {
-                    b"type" => 0u8,
-                    b"ctor" => 1,
-                    b"lift" => 2,
-                    b"ind" => 3,
+                let kind = match json::text(o, "kind")? {
+                    b"type" => QuotKind::Type,
+                    b"ctor" => QuotKind::Ctor,
+                    b"lift" => QuotKind::Lift,
+                    b"ind" => QuotKind::Ind,
                     x => return Err(cant!("unknown quot kind '{}'", String::from_utf8_lossy(x))),
                 };
-                self.dbyte(kb);
-                self.d_end(4);
-                Ok(())
+                Decl::Quot {
+                    head: Self::head_obj(o)?,
+                    kind,
+                }
             }
             b"inductive" => {
                 json::exact(o, &["ctors", "recs", "types"])?;
-                let ts = json::arr(o, "types")?;
-                let cs = json::arr(o, "ctors")?;
-                let rs = json::arr(o, "recs")?;
-                self.d_start();
-                self.dv(ts.len() as u64);
-                for t in ts {
+                let mut types = Vec::new();
+                for t in json::arr(o, "types")? {
                     let J::Obj(t) = t else {
                         return Err("expected an object".into());
                     };
@@ -1044,21 +1200,20 @@ impl Pk {
                             "type",
                         ],
                     )?;
-                    self.head_obj(t)?;
-                    let u = json::boolean(t, "isUnsafe")?;
-                    self.dbyte(u as u8);
-                    self.dv(json::int(t, "numParams")?);
-                    self.dv(json::int(t, "numIndices")?);
-                    self.dnms(&json::ints(t, "all")?)?;
-                    self.dnms(&json::ints(t, "ctors")?)?;
-                    self.dv(json::int(t, "numNested")?);
-                    let r = json::boolean(t, "isRec")?;
-                    let f = json::boolean(t, "isReflexive")?;
-                    self.dbyte(r as u8);
-                    self.dbyte(f as u8);
+                    types.push(IndType {
+                        head: Self::head_obj(t)?,
+                        is_unsafe: json::boolean(t, "isUnsafe")?,
+                        num_params: json::int(t, "numParams")?,
+                        num_indices: json::int(t, "numIndices")?,
+                        all: json::ints(t, "all")?,
+                        ctors: json::ints(t, "ctors")?,
+                        num_nested: json::int(t, "numNested")?,
+                        is_rec: json::boolean(t, "isRec")?,
+                        is_reflexive: json::boolean(t, "isReflexive")?,
+                    });
                 }
-                self.dv(cs.len() as u64);
-                for c in cs {
+                let mut ctors = Vec::new();
+                for c in json::arr(o, "ctors")? {
                     let J::Obj(c) = c else {
                         return Err("expected an object".into());
                     };
@@ -1075,17 +1230,17 @@ impl Pk {
                             "type",
                         ],
                     )?;
-                    self.head_obj(c)?;
-                    let u = json::boolean(c, "isUnsafe")?;
-                    self.dbyte(u as u8);
-                    let ind = self.nm(json::int(c, "induct")?)?;
-                    self.dv(ind as u64);
-                    self.dv(json::int(c, "cidx")?);
-                    self.dv(json::int(c, "numParams")?);
-                    self.dv(json::int(c, "numFields")?);
+                    ctors.push(IndCtor {
+                        head: Self::head_obj(c)?,
+                        is_unsafe: json::boolean(c, "isUnsafe")?,
+                        induct: json::int(c, "induct")?,
+                        cidx: json::int(c, "cidx")?,
+                        num_params: json::int(c, "numParams")?,
+                        num_fields: json::int(c, "numFields")?,
+                    });
                 }
-                self.dv(rs.len() as u64);
-                for r in rs {
+                let mut recs = Vec::new();
+                for r in json::arr(o, "recs")? {
                     let J::Obj(r) = r else {
                         return Err("expected an object".into());
                     };
@@ -1105,36 +1260,39 @@ impl Pk {
                             "type",
                         ],
                     )?;
-                    self.head_obj(r)?;
-                    let u = json::boolean(r, "isUnsafe")?;
-                    self.dbyte(u as u8);
-                    self.dnms(&json::ints(r, "all")?)?;
-                    self.dv(json::int(r, "numParams")?);
-                    self.dv(json::int(r, "numIndices")?);
-                    self.dv(json::int(r, "numMotives")?);
-                    self.dv(json::int(r, "numMinors")?);
-                    let rules = json::arr(r, "rules")?;
-                    self.dv(rules.len() as u64);
-                    for x in rules {
+                    let mut rules = Vec::new();
+                    for x in json::arr(r, "rules")? {
                         let J::Obj(x) = x else {
                             return Err("expected an object".into());
                         };
                         json::exact(x, &["ctor", "nfields", "rhs"])?;
-                        let c = self.nm(json::int(x, "ctor")?)?;
-                        self.dv(c as u64);
-                        self.dv(json::int(x, "nfields")?);
-                        self.dref(json::int(x, "rhs")?, false)?;
+                        rules.push(IndRule {
+                            ctor: json::int(x, "ctor")?,
+                            nfields: json::int(x, "nfields")?,
+                            rhs: json::int(x, "rhs")?,
+                        });
                     }
-                    let k = json::boolean(r, "k")?;
-                    self.dbyte(k as u8);
+                    recs.push(IndRec {
+                        head: Self::head_obj(r)?,
+                        is_unsafe: json::boolean(r, "isUnsafe")?,
+                        all: json::ints(r, "all")?,
+                        num_params: json::int(r, "numParams")?,
+                        num_indices: json::int(r, "numIndices")?,
+                        num_motives: json::int(r, "numMotives")?,
+                        num_minors: json::int(r, "numMinors")?,
+                        rules,
+                        k: json::boolean(r, "k")?,
+                    });
                 }
-                self.d_end(5);
-                Ok(())
+                Decl::Inductive { types, ctors, recs }
             }
-            _ => Err(cant!(
-                "unknown declaration kind '{}'",
-                String::from_utf8_lossy(k)
-            )),
-        }
+            _ => {
+                return Err(cant!(
+                    "unknown declaration kind '{}'",
+                    String::from_utf8_lossy(k)
+                ))
+            }
+        };
+        self.decl(&d)
     }
 }

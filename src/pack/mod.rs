@@ -5,12 +5,16 @@
 //! decides which expressions only one theorem's value reaches; the writer
 //! (`write`) then emits MAIN, PROOFS, INDEX and SOURCE.
 
+mod api;
 pub(crate) mod json;
 mod lines;
 mod par;
 pub(crate) mod pk;
 mod write;
 
+pub use api::{
+    Binder, Decl, Head, Hints, IndCtor, IndRec, IndRule, IndType, Packer, QuotKind, Safety,
+};
 use std::fmt;
 
 /// Whose fault a packing failure is.
