@@ -16,6 +16,9 @@ pub const SEC_PROOFS: u16 = 2;
 pub const SEC_SOURCE: u16 = 3;
 pub const SEC_PAD: u16 = 4;
 pub const SEC_INDEX: u16 = 5;
+/// Marks a file with flagged inductive blocks (kind-7 declarations): empty,
+/// must-understand, present iff some kind-7 declaration exists.
+pub const SEC_FLAGS: u16 = 6;
 
 /// Directory flag bit 0.
 pub const MUST_UNDERSTAND: u16 = 1;
@@ -23,7 +26,7 @@ pub const MUST_UNDERSTAND: u16 = 1;
 /// The flags a known section id must carry, `None` for an unknown id.
 pub fn known_flags(id: u16) -> Option<u16> {
     match id {
-        SEC_MAIN | SEC_PROOFS => Some(MUST_UNDERSTAND),
+        SEC_MAIN | SEC_PROOFS | SEC_FLAGS => Some(MUST_UNDERSTAND),
         SEC_SOURCE | SEC_PAD | SEC_INDEX => Some(0),
         _ => None,
     }
@@ -37,8 +40,71 @@ pub fn section_name(id: u16) -> String {
         SEC_SOURCE => "SOURCE".into(),
         SEC_PAD => "PAD".into(),
         SEC_INDEX => "INDEX".into(),
+        SEC_FLAGS => "FLAGS".into(),
         n => format!("section {n}"),
     }
+}
+
+/// The five flags of an inductive type in lean4export 3.2 (lean4#16595):
+/// inputs to the kernel, which checks that each one is allowed. A type
+/// without them (lean4export 3.1) is a different thing from one with every
+/// flag off: readers keep the two apart with `Option<IndFlags>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct IndFlags {
+    /// `isImpredicative`.
+    pub is_impredicative: bool,
+    /// `isK`.
+    pub is_k: bool,
+    /// `hasProjections`.
+    pub has_projections: bool,
+    /// `hasEta`.
+    pub has_eta: bool,
+    /// `hasLargeElim`.
+    pub has_large_elim: bool,
+}
+
+impl IndFlags {
+    /// The ndjson keys, in the order Susz writes the flags.
+    pub const KEYS: [&'static str; 5] = [
+        "isImpredicative",
+        "isK",
+        "hasProjections",
+        "hasEta",
+        "hasLargeElim",
+    ];
+    /// The flags in the order of [`IndFlags::KEYS`].
+    pub fn to_array(self) -> [bool; 5] {
+        [
+            self.is_impredicative,
+            self.is_k,
+            self.has_projections,
+            self.has_eta,
+            self.has_large_elim,
+        ]
+    }
+    /// From the order of [`IndFlags::KEYS`].
+    pub fn from_array(a: [bool; 5]) -> IndFlags {
+        IndFlags {
+            is_impredicative: a[0],
+            is_k: a[1],
+            has_projections: a[2],
+            has_eta: a[3],
+            has_large_elim: a[4],
+        }
+    }
+}
+
+/// Whether an export's `format.version` says every inductive type carries
+/// its flags (3.2.x). Reading never branches on the version otherwise:
+/// flags are taken where they are, and only their absence under 3.2 is an
+/// error.
+pub fn version_requires_flags(v: &[u8]) -> bool {
+    v.starts_with(b"3.2.")
+}
+
+/// Whether a packer reads an export of this `format.version` (3.1.x, 3.2.x).
+pub fn version_supported(v: &[u8]) -> bool {
+    v.starts_with(b"3.1.") || v.starts_with(b"3.2.")
 }
 
 // Record tags (spec 5.1).

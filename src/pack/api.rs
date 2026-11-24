@@ -2,7 +2,8 @@
 //! records (an exporter reading `.olean` files, say) hands them to a
 //! [`Packer`] one at a time instead of writing ndjson for `pack` to read.
 //!
-//! The records are lean4export 3.1's, with its ids: names and levels count
+//! The records are lean4export's (3.1, or 3.2 with the flags of inductive
+//! types, [`IndType::flags`]), with its ids: names and levels count
 //! from 1 (0 is the anonymous name and the zero level), expressions from 0,
 //! and a record refers only to earlier ones. Each kind of record has its own
 //! method, named after the ndjson record it stands for, and takes that
@@ -12,6 +13,7 @@
 
 use super::pk::{self, Pk};
 use super::{Options, PackError, Stats, R};
+pub use crate::format::IndFlags;
 
 /// How a binder binds (`binderInfo`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +160,11 @@ pub struct IndType {
     pub is_rec: bool,
     /// `isReflexive`.
     pub is_reflexive: bool,
+    /// The five flags of lean4export 3.2 (`isImpredicative`, `isK`,
+    /// `hasProjections`, `hasEta`, `hasLargeElim`), or `None` for a type
+    /// written without them (lean4export 3.1). The types of one block all
+    /// have them or all do not; under a 3.2 header every type has them.
+    pub flags: Option<IndFlags>,
 }
 
 /// One constructor of an [`Decl::Inductive`] block.

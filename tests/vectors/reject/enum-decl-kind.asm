@@ -1,4 +1,4 @@
-# Susz 1 test vector: declaration kind 7.
+# Susz 1 test vector: declaration kind 8.
 section MAIN
 19 0 1                  # frontier name 0: the anonymous name
 19 1 1                  # frontier level 0: level zero
@@ -35,7 +35,7 @@ section MAIN
 19 2 1                  # frontier expr 0
 9 1 0                   # expr 1: const Nat []
 19 2 1                  # frontier expr 1
-! @d0 18 7 1 0 2 0
+! @d0 18 8 1 0 2 0
 14 nat:0                # expr 2: 0
 @d1 18 1 2 0 2 1 2 1 0 1 2      # decl 1: def Nat.zero : expr 1 := expr 2, regular 1, safe, all [2]
 8 0                     # expr 3: Prop

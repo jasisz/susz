@@ -136,12 +136,14 @@ pub fn parse_parallel(path: &str, threads: usize) -> R<Option<Pk>> {
         owner.as_mut_ptr(),
     );
     let colp = &colp;
+    let needs_flags = pk.needs_flags;
     let results: Vec<R<Pk>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..threads)
             .map(|k| {
                 let (from, to) = (cuts[k], cuts[k + 1]);
                 sc.spawn(move || {
                     let mut w = Pk::new_worker((to - from) as usize);
+                    w.needs_flags = needs_flags;
                     w.kp = colp.0;
                     w.ap = colp.1;
                     w.bp = colp.2;

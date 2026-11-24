@@ -126,7 +126,7 @@ pub fn parse_capped<'a>(file: &File<'a>, key_cap: u64) -> Result<Index<'a>, Inde
         }
         let kind = b[p];
         p += 1;
-        if kind > 6 {
+        if kind > 7 {
             return Err(bad(format!("entry {i}: kind {kind}")));
         }
         off = off

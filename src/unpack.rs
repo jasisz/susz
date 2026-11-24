@@ -1,4 +1,5 @@
-//! Susz 1 back to lean4export 3.1 ndjson. Names and levels keep their ids;
+//! Susz 1 back to lean4export 3.1/3.2 ndjson
+//! (the flags of 3.2 where the file has them). Names and levels keep their ids;
 //! expressions are numbered in the order written, each proof block right
 //! before its theorem. What packing drops (spec 9.1) stays dropped:
 //! `letE.nondep` is written `false`. Packing the output again gives the
@@ -328,6 +329,13 @@ pub fn unpack<W: Write>(bytes: &[u8], w: &mut W) -> Result<(), UnpackError> {
                         ids(&mut out, &t.all);
                         out.push_str(",\"ctors\":");
                         ids(&mut out, &t.ctors);
+                        if let Some(f) = t.flags {
+                            let _ = write!(
+                                out,
+                                ",\"hasEta\":{},\"hasLargeElim\":{},\"hasProjections\":{},\"isImpredicative\":{},\"isK\":{}",
+                                f.has_eta, f.has_large_elim, f.has_projections, f.is_impredicative, f.is_k
+                            );
+                        }
                         let _ = write!(
                             out,
                             ",\"isRec\":{},\"isReflexive\":{},\"isUnsafe\":{},\"levelParams\":",

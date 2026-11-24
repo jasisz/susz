@@ -53,6 +53,9 @@ pub mod tag {
     pub const OPAQUE: u8 = 0x43;
     pub const QUOT: u8 = 0x44;
     pub const INDUCTIVE: u8 = 0x45;
+    /// An inductive block whose types carry the flags of lean4export 3.2
+    /// (0x47, not 0x46: 0x46 + `K_DECL` would be `K_REC`).
+    pub const INDUCTIVE_FLAGGED: u8 = 0x47;
     /// The kernel view's own nodes (spec 9.4): binders without their name
     /// and binder info.
     pub const K_LAM: u8 = 0x2a;
@@ -318,6 +321,8 @@ pub struct IndType {
     pub num_nested: u64,
     pub is_rec: bool,
     pub is_reflexive: bool,
+    /// The flags of lean4export 3.2, if the type carries them.
+    pub flags: Option<crate::format::IndFlags>,
 }
 
 pub struct Ctor {
@@ -421,6 +426,11 @@ fn put_type(b: &mut Vec<u8>, t: &IndType) {
     put_u64(b, t.num_nested);
     b.push(t.is_rec as u8);
     b.push(t.is_reflexive as u8);
+    if let Some(f) = t.flags {
+        for x in f.to_array() {
+            b.push(x as u8);
+        }
+    }
 }
 
 fn put_ctor(b: &mut Vec<u8>, c: &Ctor) {
@@ -532,6 +542,11 @@ impl Enc {
             }
             DeclV::Inductive { types, ctors, recs } => {
                 let kernel = self.kernel;
+                let t_ind = if types.first().is_some_and(|t| t.flags.is_some()) {
+                    t(tag::INDUCTIVE_FLAGGED)
+                } else {
+                    t_ind
+                };
                 let b = self.start(t_ind);
                 put_u64(b, types.len() as u64);
                 for t in types {
@@ -972,6 +987,7 @@ fn susz_decl(
                     num_nested: t.num_nested,
                     is_rec: t.is_rec,
                     is_reflexive: t.is_reflexive,
+                    flags: t.flags,
                 })
                 .collect(),
             ctors: ind
@@ -1450,6 +1466,12 @@ struct Nd {
     show: Option<(Paged<NameRec>, Arena)>,
     ids: Vec<u64>,
     sum: Summary,
+    /// The header's format.version is 3.2.x: every inductive type carries
+    /// its flags.
+    needs_flags: bool,
+    /// Whether the inductive blocks so far carry their flags (`None` before
+    /// the first): an export carries them on every block or on none.
+    flagged_blocks: Option<bool>,
 }
 
 /// What one line defines.
@@ -1829,12 +1851,18 @@ impl Nd {
                         "numNested",
                         "isRec",
                         "isReflexive",
+                        "isImpredicative",
+                        "isK",
+                        "hasProjections",
+                        "hasEta",
+                        "hasLargeElim",
                     ];
                     let mut keys = Keys::of(W);
                     let (mut name, mut ty) = (0u64, 0u64);
                     let (mut params, mut all, mut cs) = (Vec::new(), Vec::new(), Vec::new());
                     let mut n = [0u64; 3];
                     let mut b = [false; 3];
+                    let mut fl = [false; 5];
                     p.members(|p, k| {
                         match keys.see(k)? {
                             0 => name = p.int()?,
@@ -1847,11 +1875,17 @@ impl Nd {
                             7 => p.ints(&mut cs)?,
                             8 => n[2] = p.int()?,
                             9 => b[1] = p.boolean()?,
-                            _ => b[2] = p.boolean()?,
+                            10 => b[2] = p.boolean()?,
+                            i => fl[i - 11] = p.boolean()?,
                         }
                         Ok(())
                     })?;
-                    keys.all()?;
+                    // the flags of lean4export 3.2: all five or none
+                    let flagged = (11..16).any(|i| keys.seen >> i & 1 != 0);
+                    for i in 0..if flagged { 16 } else { 11 } {
+                        keys.need(i)?;
+                    }
+                    let flags = flagged.then(|| crate::format::IndFlags::from_array(fl));
                     first[0].get_or_insert(name);
                     types.push(IndType {
                         head: this.head(name, &params, ty)?,
@@ -1863,6 +1897,7 @@ impl Nd {
                         num_nested: n[2],
                         is_rec: b[1],
                         is_reflexive: b[2],
+                        flags,
                     });
                     Ok(())
                 })?,
@@ -1970,6 +2005,23 @@ impl Nd {
             Ok(())
         })?;
         keys.all()?;
+        let flagged = types.first().is_some_and(|t: &IndType| t.flags.is_some());
+        if types.iter().any(|t| t.flags.is_some() != flagged) {
+            return Err(inv(
+                "the types of an inductive block do not agree on carrying their flags",
+            ));
+        }
+        if self.needs_flags && !flagged && !types.is_empty() {
+            return Err(inv(
+                "an inductive type without its flags in a format 3.2 export",
+            ));
+        }
+        if self.flagged_blocks.is_some_and(|f| f != flagged) {
+            return Err(inv(
+                "inductive types with and without their flags in one export",
+            ));
+        }
+        self.flagged_blocks = Some(flagged);
         Ok(Line::Decl(
             DeclV::Inductive { types, ctors, recs },
             first[0].or(first[1]).or(first[2]),
@@ -2069,8 +2121,9 @@ impl Nd {
     }
 }
 
-// {"meta":M}, M an object whose format.version is 3.1.x.
-fn header(l: &[u8]) -> R<()> {
+// {"meta":M}, M an object whose format.version is 3.1.x or 3.2.x; whether
+// it is 3.2.x (every inductive type carries its flags).
+fn header(l: &[u8]) -> R<bool> {
     let mut p = P { s: l, i: 0 };
     let mut keys = Keys::of(&["meta"]);
     let mut version: Option<Vec<u8>> = None;
@@ -2092,7 +2145,9 @@ fn header(l: &[u8]) -> R<()> {
     p.end()?;
     keys.all()?;
     match version {
-        Some(v) if v.starts_with(b"3.1.") => Ok(()),
+        Some(v) if crate::format::version_supported(&v) => {
+            Ok(crate::format::version_requires_flags(&v))
+        }
         Some(v) => Err(cant(format!(
             "format version {} is not supported",
             lossy(&v)
@@ -2101,7 +2156,7 @@ fn header(l: &[u8]) -> R<()> {
     }
 }
 
-/// The digest of an ndjson export (lean4export 3.1), read line by line from
+/// The digest of an ndjson export (lean4export 3.1 or 3.2), read line by line from
 /// `r`. With `names`, each entry carries its declaration's dotted name, and
 /// the names' components are kept for that.
 pub fn ndjson<B: BufRead>(r: B, names: bool, each: &mut Each<'_>) -> Result<Summary, Error> {
@@ -2123,6 +2178,8 @@ pub fn ndjson_view<B: BufRead>(
         show: names.then(|| (Paged::new(), Arena::new())),
         ids: Vec::new(),
         sum: Summary::default(),
+        needs_flags: false,
+        flagged_blocks: None,
     };
     let anon = nd.enc.anon();
     let zero = nd.enc.zero();
@@ -2144,7 +2201,7 @@ pub fn ndjson_view<B: BufRead>(
             buf.pop();
         }
         let res = if ln == 1 {
-            header(&buf)
+            header(&buf).map(|f| nd.needs_flags = f)
         } else if buf.is_empty() {
             Ok(())
         } else {

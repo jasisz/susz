@@ -2,7 +2,9 @@
 // of expressions, the stream of other records, names made canonical, owners
 // seeded by declarations.
 
-use super::api::{Decl, Head, Hints, IndCtor, IndRec, IndRule, IndType, QuotKind, Safety};
+use super::api::{
+    Decl, Head, Hints, IndCtor, IndFlags, IndRec, IndRule, IndType, QuotKind, Safety,
+};
 use super::json::{self, J};
 use super::{cant, inv, R};
 use crate::canon::Canon;
@@ -255,6 +257,9 @@ pub struct Pk {
     pub cn: Canon,
     pub owner: Vec<u32>,
     pub meta: Vec<u8>,
+    // the header's format.version is 3.2.x: every inductive type must carry
+    // its flags
+    pub needs_flags: bool,
     // parsing a range on a worker: no owners or canonical names made here
     pub worker: bool,
     pub fl: bool,
@@ -309,6 +314,7 @@ impl Pk {
             cn: Canon::new(),
             owner: Vec::new(),
             meta: Vec::new(),
+            needs_flags: false,
             worker: false,
             fl: false,
             dmeta: Vec::new(),
@@ -885,6 +891,17 @@ impl Pk {
                 4
             }
             Decl::Inductive { types, ctors, recs } => {
+                let flagged = types.first().is_some_and(|t| t.flags.is_some());
+                if types.iter().any(|t| t.flags.is_some() != flagged) {
+                    return Err(inv!(
+                        "the types of an inductive block do not agree on carrying their flags"
+                    ));
+                }
+                if self.needs_flags && !flagged && !types.is_empty() {
+                    return Err(inv!(
+                        "an inductive type without its flags in a format 3.2 export"
+                    ));
+                }
                 self.dv(types.len() as u64);
                 for t in types {
                     self.head(&t.head)?;
@@ -896,6 +913,11 @@ impl Pk {
                     self.dv(t.num_nested);
                     self.dbyte(t.is_rec as u8);
                     self.dbyte(t.is_reflexive as u8);
+                    if let Some(f) = t.flags {
+                        for x in f.to_array() {
+                            self.dbyte(x as u8);
+                        }
+                    }
                 }
                 self.dv(ctors.len() as u64);
                 for c in ctors {
@@ -925,7 +947,11 @@ impl Pk {
                     }
                     self.dbyte(r.k as u8);
                 }
-                5
+                if flagged {
+                    7
+                } else {
+                    5
+                }
             }
         };
         self.d_end(kind);
@@ -943,7 +969,7 @@ impl Pk {
         let meta = json::obj(&fs, "meta")?;
         json::exact(&fs, &["meta"])?;
         let v = json::text(json::obj(meta, "format")?, "version")?;
-        if !v.starts_with(b"3.1.") {
+        if !crate::format::version_supported(v) {
             return Err(cant!(
                 "format version {} is not supported",
                 String::from_utf8_lossy(v)
@@ -952,6 +978,7 @@ impl Pk {
         if !(l.starts_with(b"{\"meta\":") && l.ends_with(b"}")) {
             return Err(cant!("the header is not in the form {{\"meta\":...}}"));
         }
+        self.needs_flags = crate::format::version_requires_flags(v);
         self.meta = l[8..l.len() - 1].to_vec();
         Ok(())
     }
@@ -1184,22 +1211,34 @@ impl Pk {
                     let J::Obj(t) = t else {
                         return Err("expected an object".into());
                     };
-                    json::exact(
-                        t,
-                        &[
-                            "all",
-                            "ctors",
-                            "isRec",
-                            "isReflexive",
-                            "isUnsafe",
-                            "levelParams",
-                            "name",
-                            "numIndices",
-                            "numNested",
-                            "numParams",
-                            "type",
-                        ],
-                    )?;
+                    const BASE: [&str; 11] = [
+                        "all",
+                        "ctors",
+                        "isRec",
+                        "isReflexive",
+                        "isUnsafe",
+                        "levelParams",
+                        "name",
+                        "numIndices",
+                        "numNested",
+                        "numParams",
+                        "type",
+                    ];
+                    // the flags of lean4export 3.2: all five or none
+                    let fk = IndFlags::KEYS;
+                    let flags = if fk.iter().any(|k| json::has(t, k)) {
+                        let mut keys = BASE.to_vec();
+                        keys.extend_from_slice(&fk);
+                        json::exact(t, &keys)?;
+                        let mut a = [false; 5];
+                        for (x, k) in a.iter_mut().zip(fk) {
+                            *x = json::boolean(t, k)?;
+                        }
+                        Some(IndFlags::from_array(a))
+                    } else {
+                        json::exact(t, &BASE)?;
+                        None
+                    };
                     types.push(IndType {
                         head: Self::head_obj(t)?,
                         is_unsafe: json::boolean(t, "isUnsafe")?,
@@ -1210,6 +1249,7 @@ impl Pk {
                         num_nested: json::int(t, "numNested")?,
                         is_rec: json::boolean(t, "isRec")?,
                         is_reflexive: json::boolean(t, "isReflexive")?,
+                        flags,
                     });
                 }
                 let mut ctors = Vec::new();

@@ -12,6 +12,7 @@
 //! 8), the same whatever the order blocks are read in.
 
 use crate::canon::Canon;
+pub use crate::format::IndFlags;
 use crate::format::{self, VarintError};
 use std::fmt;
 
@@ -85,6 +86,10 @@ pub enum Class {
     Counts,
     /// The file goes past one of this reader's own limits (declined).
     Limit,
+    /// FLAGS and the flagged inductive blocks (kind 7) disagree: a kind-7
+    /// declaration without FLAGS, a kind-5 declaration with FLAGS, FLAGS
+    /// without a kind-7 one, or FLAGS not empty.
+    FlagsSection,
 }
 
 impl Class {
@@ -125,6 +130,7 @@ impl Class {
             BlockCount => "block-count",
             Counts => "counts",
             Limit => "limit",
+            FlagsSection => "flags-section",
         }
     }
     /// Classes that decline instead of rejecting.
@@ -447,6 +453,17 @@ impl<'a> File<'a> {
                 ));
             }
         }
+        for (i, s) in sections.iter().enumerate() {
+            if s.id == format::SEC_FLAGS && s.length != 0 {
+                return Err(Failure::new(
+                    Class::FlagsSection,
+                    Place::Directory,
+                    ts + 20 + format::ENTRY_LEN * i as u64 + 16,
+                    i as u64 + 1,
+                    format!("FLAGS holds {} bytes: it is empty", s.length),
+                ));
+            }
+        }
         for s in &sections {
             if s.id == format::SEC_PAD {
                 let body = &bytes[s.offset as usize..(s.offset + s.length) as usize];
@@ -487,7 +504,10 @@ impl<'a> File<'a> {
     pub fn main(&self) -> Main<'a> {
         let s = self.section(format::SEC_MAIN).expect("open checks MAIN");
         let proofs = self.section(format::SEC_PROOFS);
+        let flags = self.section(format::SEC_FLAGS);
         Main {
+            flags,
+            flagged: false,
             bytes: self.bytes,
             p: s.offset as usize,
             end: (s.offset + s.length) as usize,
@@ -622,6 +642,9 @@ pub struct IndType<'a> {
     pub num_nested: u64,
     pub is_rec: bool,
     pub is_reflexive: bool,
+    /// The five flags of lean4export 3.2: `Some` for every type of a
+    /// flagged block (kind 7), `None` for every type of a kind-5 block.
+    pub flags: Option<IndFlags>,
 }
 
 #[derive(Debug, Clone)]
@@ -659,6 +682,9 @@ pub struct Inductive<'a> {
     pub types: Vec<IndType<'a>>,
     pub ctors: Vec<Ctor<'a>>,
     pub recs: Vec<Rec<'a>>,
+    /// A flagged block (kind 7): every type carries the flags of
+    /// lean4export 3.2.
+    pub flagged: bool,
 }
 
 /// A theorem's proof block: where it is and what it may name.
@@ -717,7 +743,7 @@ pub enum Decl<'a> {
 }
 
 impl Decl<'_> {
-    /// The kind byte (0-6).
+    /// The kind byte (0-7).
     pub fn kind(&self) -> u8 {
         match self {
             Decl::Axiom { .. } => 0,
@@ -725,6 +751,7 @@ impl Decl<'_> {
             Decl::Thm { .. } => 2,
             Decl::Opaque { .. } => 3,
             Decl::Quot { .. } => 4,
+            Decl::Inductive(i) if i.flagged => 7,
             Decl::Inductive(_) => 5,
             Decl::ThmBlock { .. } => 6,
         }
@@ -1039,6 +1066,9 @@ pub struct Main<'a> {
     counts: [u32; 4],
     trailer: u64,
     proofs: Option<Section>,
+    // FLAGS, and whether a kind-7 declaration was read
+    flags: Option<Section>,
+    flagged: bool,
     st: State,
 }
 
@@ -1337,7 +1367,7 @@ impl<'a> Main<'a> {
     }
 
     fn decl(&mut self, c: &mut Cur<'a>) -> Result<Decl<'a>, E> {
-        let kind = c.enm(6, "declaration kind")?;
+        let kind = c.enm(7, "declaration kind")?;
         Ok(match kind {
             0 => {
                 let head = self.head(c)?;
@@ -1389,7 +1419,22 @@ impl<'a> Main<'a> {
                     kind: c.enm(3, "quotient kind")?,
                 }
             }
-            5 => {
+            5 | 7 => {
+                let flagged = kind == 7;
+                if flagged {
+                    if self.flags.is_none() {
+                        return Err((
+                            Class::FlagsSection,
+                            "a flagged inductive block in a file without FLAGS".into(),
+                        ));
+                    }
+                    self.flagged = true;
+                } else if self.flags.is_some() {
+                    return Err((
+                        Class::FlagsSection,
+                        "an inductive block without flags in a file with FLAGS".into(),
+                    ));
+                }
                 let nt = c.count(10)?;
                 let mut types = Vec::with_capacity(nt as usize);
                 for _ in 0..nt {
@@ -1402,6 +1447,15 @@ impl<'a> Main<'a> {
                     let num_nested = c.v()?;
                     let is_rec = c.boolean()?;
                     let is_reflexive = c.boolean()?;
+                    let flags = if flagged {
+                        let mut a = [false; 5];
+                        for x in a.iter_mut() {
+                            *x = c.boolean()?;
+                        }
+                        Some(IndFlags::from_array(a))
+                    } else {
+                        None
+                    };
                     types.push(IndType {
                         head,
                         is_unsafe,
@@ -1412,6 +1466,7 @@ impl<'a> Main<'a> {
                         num_nested,
                         is_rec,
                         is_reflexive,
+                        flags,
                     });
                 }
                 let nc = c.count(8)?;
@@ -1463,7 +1518,12 @@ impl<'a> Main<'a> {
                         k,
                     });
                 }
-                Decl::Inductive(Box::new(Inductive { types, ctors, recs }))
+                Decl::Inductive(Box::new(Inductive {
+                    types,
+                    ctors,
+                    recs,
+                    flagged,
+                }))
             }
             _ => {
                 let head = self.head(c)?;
@@ -1530,6 +1590,15 @@ impl<'a> Main<'a> {
                     ),
                 ));
             }
+        }
+        if let (Some(s), false) = (self.flags, self.flagged) {
+            return Err(Failure::new(
+                Class::FlagsSection,
+                Place::Section(format::SEC_FLAGS),
+                s.offset,
+                0,
+                "FLAGS without a flagged inductive block",
+            ));
         }
         if let Some(s) = self.proofs {
             if self.st.blocks.is_empty() {
