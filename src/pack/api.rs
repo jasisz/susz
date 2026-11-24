@@ -158,8 +158,11 @@ pub struct IndType {
     pub num_nested: u64,
     /// `isRec`.
     pub is_rec: bool,
-    /// `isReflexive`.
-    pub is_reflexive: bool,
+    /// `isReflexive`, or `None` for a type written without it (Lean since
+    /// lean4#16595 does not have it; a kernel computes it). Only a type with
+    /// its [`flags`](IndType::flags) may leave it out, and the types of one
+    /// export all have it or all do not.
+    pub is_reflexive: Option<bool>,
     /// The five flags of lean4export 3.2 (`isImpredicative`, `isK`,
     /// `hasProjections`, `hasEta`, `hasLargeElim`), or `None` for a type
     /// written without them (lean4export 3.1). The types of one block all

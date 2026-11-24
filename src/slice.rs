@@ -443,8 +443,10 @@ impl Emit<'_> {
                             kv("ctors", self.jnames(&t.ctors)),
                             kv("numNested", J::Int(t.num_nested)),
                             kv("isRec", J::Bool(t.is_rec)),
-                            kv("isReflexive", J::Bool(t.is_reflexive)),
                         ]);
+                        if let Some(r) = t.is_reflexive {
+                            o.push(kv("isReflexive", J::Bool(r)));
+                        }
                         if let Some(f) = t.flags {
                             for (k, x) in crate::format::IndFlags::KEYS.iter().zip(f.to_array()) {
                                 o.push(kv(k, J::Bool(x)));

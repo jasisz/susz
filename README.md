@@ -8,7 +8,9 @@ just without the JSON. Exports in format 3.2, whose inductive types carry the
 five flags of the kernel renovation ([lean4#16595](https://github.com/leanprover/lean4/pull/16595)),
 are packed too: their blocks keep the flags, kept apart from blocks without
 them, and a file has them on every inductive block or on none (spec,
-sections 5.2 and 9.2).
+sections 5.2 and 9.2). So are exports of the renovated Lean, which no longer
+has `isReflexive` (a kernel computes it): their blocks leave it out too
+(kind 8, spec Appendix D).
 
 Why bother:
 
@@ -42,7 +44,7 @@ cargo install susz --features mmap   # verify and unpack map the file
 
 Or the latest from this repository: `cargo install --git https://github.com/jasisz/susz`.
 
-The crate's version is not the format's. Every release so far, 0.4 included, writes and reads Susz 1 ([docs/spec.md](docs/spec.md)), so files packed by any of them read with any other. 0.2.0 changed only the library's `digest` API; 0.2.1 adds `digest --kernel` (spec 9.4); 0.2.2 converts big Nat literals with dashu-int instead of malachite (LGPL), with the same bytes, and packs `mdata` without `data` (spec 9.1). 0.3.0 adds `susz::pack::Packer`, which packs records handed over one at a time, without ndjson, into the same bytes. 0.4.0 packs and reads lean4export 3.2 exports with the inductive flags of the kernel renovation ([lean4#16595](https://github.com/leanprover/lean4/pull/16595)) under the 2026-11-24 revision of the spec (flagged blocks of kind 7 and the must-understand FLAGS section); the API gains `format::IndFlags`, `pack::IndType::flags`, `read::IndType::flags`, `read::Inductive::flagged`, `digest::IndType::flags` and `read::Class::FlagsSection`. Files from 3.1 exports come out byte for byte as before.
+The crate's version is not the format's. Every release so far, 0.5 included, writes and reads Susz 1 ([docs/spec.md](docs/spec.md)), so files packed by any of them read with any other, except that a reader declines a file with a must-understand section newer than itself (FLAGS before 0.4, NOREFL before 0.5). 0.2.0 changed only the library's `digest` API; 0.2.1 adds `digest --kernel` (spec 9.4); 0.2.2 converts big Nat literals with dashu-int instead of malachite (LGPL), with the same bytes, and packs `mdata` without `data` (spec 9.1). 0.3.0 adds `susz::pack::Packer`, which packs records handed over one at a time, without ndjson, into the same bytes. 0.4.0 packs and reads lean4export 3.2 exports with the inductive flags of the kernel renovation ([lean4#16595](https://github.com/leanprover/lean4/pull/16595)) under the 2026-11-24 revision of the spec (flagged blocks of kind 7 and the must-understand FLAGS section); the API gains `format::IndFlags`, `pack::IndType::flags`, `read::IndType::flags`, `read::Inductive::flagged`, `digest::IndType::flags` and `read::Class::FlagsSection`. Files from 3.1 exports come out byte for byte as before. 0.5.0 packs and reads exports without `isReflexive` (Lean after lean4#16595) under the second 2026-11-24 revision (Appendix D: kind 8 and the must-understand NOREFL section); `is_reflexive` becomes `Option<bool>` in `pack::IndType`, `read::IndType` and `digest::IndType`, and the API gains `format::SEC_NOREFL` and `read::Inductive::reflexive`. Files from exports that carry `isReflexive` come out byte for byte as before.
 
 ## Usage
 
@@ -449,7 +451,9 @@ full checker on them, not just a reader.
 lean-kernel-arena's renovation tests (SBool, LAnd); `tests/renovation.rs`
 checks that the flags are packed, read, unpacked and digested, and that a
 3.2 export without them, or an export mixing types with and without them,
-is refused.
+is refused. It also holds ImpMutB from lean-kernel-arena-beta, exported by
+Lean `pr-release-16595-55bd690` without `isReflexive`; `tests/reflexive.rs`
+checks kind 8 the same way.
 
 `tests/corpus/init-prelude.ndjson.gz` is a lean4export export of Lean's
 `Init.Prelude` (see [tests/corpus/README.md](tests/corpus/README.md)). The

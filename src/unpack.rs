@@ -336,11 +336,11 @@ pub fn unpack<W: Write>(bytes: &[u8], w: &mut W) -> Result<(), UnpackError> {
                                 f.has_eta, f.has_large_elim, f.has_projections, f.is_impredicative, f.is_k
                             );
                         }
-                        let _ = write!(
-                            out,
-                            ",\"isRec\":{},\"isReflexive\":{},\"isUnsafe\":{},\"levelParams\":",
-                            t.is_rec, t.is_reflexive, t.is_unsafe
-                        );
+                        let _ = write!(out, ",\"isRec\":{}", t.is_rec);
+                        if let Some(r) = t.is_reflexive {
+                            let _ = write!(out, ",\"isReflexive\":{r}");
+                        }
+                        let _ = write!(out, ",\"isUnsafe\":{},\"levelParams\":", t.is_unsafe);
                         ids(&mut out, &t.head.params);
                         let _ = write!(out, ",\"name\":{},\"numIndices\":{},\"numNested\":{},\"numParams\":{},\"type\":{}}}", t.head.name, t.num_indices, t.num_nested, t.num_params, ie[t.head.ty as usize]);
                     }

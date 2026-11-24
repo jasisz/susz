@@ -19,6 +19,10 @@ pub const SEC_INDEX: u16 = 5;
 /// Marks a file with flagged inductive blocks (kind-7 declarations): empty,
 /// must-understand, present iff some kind-7 declaration exists.
 pub const SEC_FLAGS: u16 = 6;
+/// Marks a file whose inductive blocks do not carry `isReflexive` (kind-8
+/// declarations): empty, must-understand, present iff some kind-8
+/// declaration exists.
+pub const SEC_NOREFL: u16 = 7;
 
 /// Directory flag bit 0.
 pub const MUST_UNDERSTAND: u16 = 1;
@@ -26,7 +30,7 @@ pub const MUST_UNDERSTAND: u16 = 1;
 /// The flags a known section id must carry, `None` for an unknown id.
 pub fn known_flags(id: u16) -> Option<u16> {
     match id {
-        SEC_MAIN | SEC_PROOFS | SEC_FLAGS => Some(MUST_UNDERSTAND),
+        SEC_MAIN | SEC_PROOFS | SEC_FLAGS | SEC_NOREFL => Some(MUST_UNDERSTAND),
         SEC_SOURCE | SEC_PAD | SEC_INDEX => Some(0),
         _ => None,
     }
@@ -41,6 +45,7 @@ pub fn section_name(id: u16) -> String {
         SEC_PAD => "PAD".into(),
         SEC_INDEX => "INDEX".into(),
         SEC_FLAGS => "FLAGS".into(),
+        SEC_NOREFL => "NOREFL".into(),
         n => format!("section {n}"),
     }
 }

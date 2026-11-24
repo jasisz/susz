@@ -1,7 +1,8 @@
 # Susz 1
 
 Version: Susz 1 (major 1), 2026-11-12; revised 2026-11-24 (flagged
-inductive blocks, Appendix C).
+inductive blocks, Appendix C) and 2026-11-24 (blocks without
+`isReflexive`, Appendix D).
 
 Susz (`.susz`) is a binary form of a Lean 4 kernel export. It holds the
 records of a lean4export 3.1 or 3.2 ndjson file, with no text to parse. A proof that
@@ -15,7 +16,7 @@ MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 Sections 1 to 10 are normative. Section 11 describes the test vectors.
 Appendix A lists the choices we made and why. The text refers to them as A.1
 to A.15. Appendix B lists the changes from internal version 2. Appendix C
-lists the 2026-11-24 revision.
+lists the 2026-11-24 revision, Appendix D the second one of that day.
 [`OPEN.md`](OPEN.md) tells which questions came up while implementing. Their
 answers are now part of the sections below.
 
@@ -152,8 +153,9 @@ end-magic = 5A 53 55 53                                           ; "ZSUS"
 | 3 | SOURCE | no | no | the source export's `meta` object, verbatim UTF-8 JSON (A.10) |
 | 4 | PAD | no | no | zero bytes, for alignment; MUST be all `0x00` |
 | 5 | INDEX | no | no (written by default, `--no-index` omits it) | declaration index and name table (section 6a) |
-| 6 | FLAGS | yes | iff some kind-7 declaration exists (then no kind-5 one does) | none: the section MUST be empty (length 0) |
-| 7..0x7FFF | reserved | | | |
+| 6 | FLAGS | yes | iff some kind-7 or kind-8 declaration exists (then no kind-5 one does) | none: the section MUST be empty (length 0) |
+| 7 | NOREFL | yes | iff some kind-8 declaration exists (then no kind-5 or kind-7 one does) | none: the section MUST be empty (length 0) |
+| 8..0x7FFF | reserved | | | |
 | 0x8000..0xFFFF | private / experimental | | | never in canonical files |
 
 - A known id whose flags differ from the table is a structural error.
@@ -184,7 +186,17 @@ end-magic = 5A 53 55 53                                           ; "ZSUS"
   kind-7 record in a file without FLAGS, a kind-5 record in a file with
   FLAGS, and FLAGS in a file without a kind-7 record, are structural errors
   of the same class (section 8.1). So with FLAGS every inductive block is
-  kind 7, and without it every one is kind 5.
+  kind 7 (or kind 8, below), and without it every one is kind 5.
+- NOREFL announces inductive blocks whose types do not carry `isReflexive`
+  (kind 8, section 5.2). Like FLAGS it carries no bytes and is
+  must-understand, so a reader written before it declines such a file
+  ("needs section 7"). A NOREFL section of non-zero length is a structural
+  error (class `flags-section`) at its entry's length field. A kind-8
+  record in a file without NOREFL, a kind-5 or kind-7 record in a file with
+  NOREFL, and NOREFL in a file without a kind-8 record, are structural
+  errors of the same class (section 8.1). A kind-8 block is flagged, so a
+  file with NOREFL has FLAGS too, and every inductive block in it is
+  kind 8.
 
 ## 5. MAIN section
 
@@ -255,6 +267,7 @@ kind are numbered from 0 in record order. An item MUST NOT be listed twice
 | 5 | inductive block | types, ctors, recs: each a varint count then the parts |
 | 6 | theorem, proof in a block | head, block-length: varint, block-exprs: varint, all: list |
 | 7 | flagged inductive block | as kind 5, each type followed by its five flags |
+| 8 | flagged inductive block without `isReflexive` | as kind 7, each type without its `isReflexive` byte |
 
 The remaining fields:
 
@@ -266,7 +279,8 @@ The remaining fields:
   In a kind-7 record each type goes on with its flags, five bools in this
   order: isImpredicative, isK, hasProjections, hasEta, hasLargeElim. Nothing
   else differs between kinds 5 and 7: constructors and recursors are written
-  alike.
+  alike. A kind-8 record is a kind-7 record whose types leave out
+  `isReflexive`: after isRec come the five flags.
 - Constructor: head, unsafe: bool, induct: name, cidx: varint, numParams:
   varint, numFields: varint.
 - Recursor: head, unsafe: bool, all: list, numParams: varint, numIndices:
@@ -288,6 +302,21 @@ no rules (`rules` count 0), in either kind: with the flags, a recursor that
 eliminates only into `Prop` (no `hasLargeElim`) has none. The format checks
 no relation between the flags, the recursors' `k` and the rest; that is the
 kernel's job.
+
+**Blocks without `isReflexive`.** `isReflexive` says whether some
+constructor of the block has a field whose type is a function into a type of
+the block. It is no input of the kernel: the kernel computes it while it
+checks the constructors (on the block with its nested types eliminated),
+and checkers compare their own value with the export's. Lean dropped the
+field from `InductiveVal` with the renovation (lean4#16595), and its
+exports no longer write it. A kind-8 block keeps what such an export
+says, and nothing more: its types have no `isReflexive`, and a checker
+computes it and has nothing to compare it with. Kinds 5 and 7 keep the
+value the export gave, which a checker still compares. "Not given" is not
+"false". As with the flags, a file is one or the other as a whole: with
+NOREFL every inductive block is kind 8 (section 4.1). Only flagged blocks
+come without it, because only the renovation's exports leave it out; an
+unflagged block without `isReflexive` has no kind.
 
 **Name equality.** MAIN may hold two name records for the same name. Two
 names are equal when both are the anonymous name, or when their prefixes are
@@ -362,7 +391,7 @@ component  = 01 len:varint utf8-bytes      ; string component
 ```
 
 - `entry` i describes declaration i, in declaration order. `kind` is its
-  declaration kind (0-7).
+  declaration kind (0-8).
 - `main-delta` is the offset of the record's tag byte minus that of entry
   i−1. For i = 0 it is minus the start of MAIN. Prefix sums give absolute
   offsets.
@@ -507,22 +536,26 @@ it finds.
    then a decline for an unknown must-understand section, the first one in
    directory order. So a file with a malformed directory is rejected, even
    if it also needs an unknown section.
-4. FLAGS's length (it MUST be 0), at its entry's length field. Then PAD's
+4. FLAGS's and NOREFL's lengths (they MUST be 0), at the entry's length
+   field, the first such entry in directory order. Then PAD's
    all-zero rule, at the first non-zero byte.
 5. The MAIN records, in file order. Inside one record, the first broken
    field in byte order. A declared name is checked for being anonymous or
    declared twice when its name field is read, before the fields after it.
    A kind-6 record whose block would run past the end of PROOFS, or that has
    no PROOFS section at all, is an error at that record, of class
-   `proofs-fill`. A kind-7 record in a file without FLAGS, and a kind-5
-   record in a file with FLAGS, are errors at that record, of class
-   `flags-section`, found right after its kind byte.
+   `proofs-fill`. A kind-7 or kind-8 record in a file without FLAGS, a
+   kind-5 record in a file with FLAGS, a kind-8 record in a file without
+   NOREFL, and a kind-5 or kind-7 record in a file with NOREFL, are errors
+   at that record, of class `flags-section`, found right after its kind
+   byte. The NOREFL rules are checked before the FLAGS ones.
 6. After the last MAIN record, the trailer counts: the first one that
    differs from what MAIN defines (names, levels, expressions,
    declarations), at that count. Before this point a reader uses the counts
    only as allocation hints, capped by MAIN's length.
-7. Then FLAGS without any kind-7 record: class `flags-section`, at FLAGS's
-   offset (record number 0).
+7. Then FLAGS without any kind-7 or kind-8 record: class `flags-section`,
+   at FLAGS's offset (record number 0). Then NOREFL without any kind-8
+   record, likewise at NOREFL's offset.
 8. Then the rest of the PROOFS fill. A PROOFS section with no kind-6 record
    (even of length 0) is an error at its first byte. A PROOFS section longer
    than its blocks is an error at the first byte after the last block.
@@ -575,15 +608,18 @@ packers produce identical bytes.
   the anonymous name and level zero are listed, their entries come first,
   before any record.
 - Sections come in this order, in the body and in the directory alike:
-  FLAGS (id 6, only when some kind-7 declaration exists; empty, so it starts
-  at offset 16, where MAIN starts), MAIN (id 1), PROOFS (id 2, only when
+  FLAGS (id 6, only when some kind-7 or kind-8 declaration exists; empty,
+  so it starts at offset 16, where MAIN starts), NOREFL (id 7, only when
+  some kind-8 declaration exists; empty, at offset 16 too), MAIN (id 1), PROOFS (id 2, only when
   some kind-6 declaration exists), INDEX (id 5), SOURCE (id 3). This is not
   id order.
 - An inductive block whose types carry the five flags in the export is
-  written as kind 7, any other as kind 5. A packer never adds or computes
-  flags, and never drops them. Since the types of an export carry flags all
-  or none (section 9.2), a packed file has only kind-7 blocks (with FLAGS)
-  or only kind-5 blocks (without).
+  written as kind 7, or as kind 8 when they do not carry `isReflexive`; any
+  other as kind 5. A packer never adds or computes flags or
+  `isReflexive`, and never drops them. Since the types of an export carry
+  flags all or none, and `isReflexive` all or none (section 9.2), a packed
+  file has only kind-8 blocks (with FLAGS and NOREFL), only kind-7 blocks
+  (with FLAGS), or only kind-5 blocks (with neither).
 - INDEX is written by default and left out with `--no-index`. Every
   canonical packer has this option.
 - SOURCE is always written. It holds the source export's `meta` object, byte
@@ -633,6 +669,10 @@ accepted dialect is fixed here.
   only adds one rule: in a 3.2.x export every inductive type MUST carry its
   flags. A 3.2.x export with a type without them is refused, not packed as
   a block without flags.
+- An object in `inductive.types` that carries the five flags may leave out
+  `isReflexive`, as Lean's exports do since lean4#16595 (under either
+  version). If one inductive type of the export leaves it out, every one
+  MUST. A type without the flags MUST carry it, as before.
 
 A packer refuses an input in one of two classes. The `susz` tool exits with
 1 or 2.
@@ -643,8 +683,10 @@ A packer refuses an input in one of two classes. The `susz` tool exits with
   used before it is defined, a name declared twice (compared by value), a
   declaration of the anonymous name, an empty input, an inductive type with
   some of the five flag keys but not all, inductive types with and without
-  flags in one export (in one block or in different blocks), and an
-  inductive type without its flags in a 3.2.x export.
+  flags in one export (in one block or in different blocks), an inductive
+  type without its flags in a 3.2.x export, inductive types with and
+  without `isReflexive` in one export (in one block or in different
+  blocks), and an inductive type without `isReflexive` and without flags.
 - **Cannot pack** (exit 2). The input may be a fine export, but this packer
   cannot write it. Examples are a header in another form, another
   `format.version`, a record kind or key outside lean4export 3.1 and 3.2, a number
@@ -727,6 +769,7 @@ Declarations, where `head` is name: h, levelParams: hs, type: h:
 | `0x44` | quotient | head, kind: u8 (0 type, 1 ctor, 2 lift, 3 ind) |
 | `0x45` | inductive block | types: u64 count, then each type; ctors: u64 count, then each constructor; recs: u64 count, then each recursor |
 | `0x47` | flagged inductive block (kind 7) | as `0x45`, each type with its flags |
+| `0x48` | flagged inductive block without `isReflexive` (kind 8) | as `0x47`, each type without isReflexive |
 
 - Hints: `0x00` opaque, `0x01` abbrev, or `0x02` then height: u64
   (regular).
@@ -734,7 +777,8 @@ Declarations, where `head` is name: h, levelParams: hs, type: h:
 - Inductive type: head, isUnsafe: u8, numParams: u64, numIndices: u64, all:
   hs, ctors: hs, numNested: u64, isRec: u8, isReflexive: u8. In a flagged
   block (`0x47`) it goes on with isImpredicative: u8, isK: u8,
-  hasProjections: u8, hasEta: u8, hasLargeElim: u8.
+  hasProjections: u8, hasEta: u8, hasLargeElim: u8. In a `0x48` block
+  isReflexive is left out: the flags follow isRec.
 - Constructor: head, isUnsafe: u8, induct: h, cidx: u64, numParams: u64,
   numFields: u64.
 - Recursor: head, isUnsafe: u8, all: hs, numParams: u64, numIndices: u64,
@@ -783,7 +827,8 @@ so a node with no binder in it has the same hash in both digests.
 
 **Declarations.** A declaration's tag is its section 9.3 tag plus `0x10`:
 `0x50` axiom, `0x51` definition, `0x52` theorem, `0x53` opaque, `0x54`
-quotient, `0x55` inductive block, `0x57` flagged inductive block. (The
+quotient, `0x55` inductive block, `0x57` flagged inductive block, `0x58`
+flagged inductive block without `isReflexive`. (The
 flagged block's exact tag is `0x47`, not `0x46`, so that its kernel tag
 is not `0x56`, the recursor's node tag below.) The fields are those of section 9.3,
 except the recursors of an inductive block.
@@ -799,6 +844,7 @@ encoding ends with these node hashes sorted in ascending byte order, as
 | --- | --- | --- |
 | `0x55` | inductive block | types: u64 count, then each type; ctors: u64 count, then each constructor; recs: hs, sorted |
 | `0x57` | flagged inductive block | as `0x55`, each type with its flags as in section 9.3 |
+| `0x58` | flagged inductive block without `isReflexive` | as `0x57`, each type without isReflexive as in section 9.3 |
 
 A block's recursors have distinct names (section 5.2), so their node
 hashes differ unless SHA-256 collides, and sorting them gives one order.
@@ -894,7 +940,8 @@ byte on every corpus file, for each setting.
   blocks; a block naming frontier items of each kind; varint edge values (0,
   127, 128, 2^63, 2^64−1); `nat` 0, 255, 256, 2^64, 2^200; strings with NUL
   and 4-byte UTF-8; unknown informational section; PAD; a flagged inductive
-  block with FLAGS. The declarations in
+  block with FLAGS; flagged blocks without `isReflexive` with FLAGS and
+  NOREFL. The declarations in
   every accept vector are valid Lean, so a full checker accepts them and
   reaches the one fault in each reject vector made from them. (Checked with
   Pestka; not yet with Lean's own kernel.)
@@ -911,8 +958,10 @@ byte on every corpus file, for each setting.
   (across records and inside one block); a declaration of the anonymous name;
   `block-exprs` of 2^32; PAD with a non-zero byte; a kind-7 record without
   FLAGS; a kind-5 record with FLAGS; FLAGS without a kind-7 record; FLAGS
-  not empty; a flag byte 2;
-  declaration kind 8. The rule P vectors are
+  not empty; a flag byte 2; a kind-8 record without NOREFL; a kind-8
+  record without FLAGS; a kind-7 record with NOREFL; NOREFL without a
+  kind-8 record; NOREFL not empty;
+  declaration kind 9. The rule P vectors are
   declaration failures, not malformed files, but they sit with the reject
   vectors because the outcome is rejected.
 - **Decline:** major 2; unknown must-understand section.
@@ -1174,3 +1223,64 @@ and the ndjson digest refuse an export whose types do not all agree on
 carrying flags (exit 1). A slice of a file with FLAGS keeps FLAGS whenever
 it keeps an inductive block, and keeps every block kind 7.
 
+## Appendix D. Changes in the second 2026-11-24 revision
+
+Lean's kernel renovation (lean4#16595) dropped `isReflexive` from
+`InductiveVal`, so exports made with it (for instance Lean
+`pr-release-16595-55bd690`, used by lean-kernel-arena-beta) no longer write
+the key, even under `format.version` 3.1.0 with the flags. Susz 1 as of
+Appendix C required it on every inductive type, so the packer refused
+those exports ("missing key 'isReflexive'"). The revision lets a flagged
+type leave it out, and keeps that apart in the file. It is compatible both
+ways that matter:
+
+- A file packed from an export that carries `isReflexive` (every 3.1
+  export, and 3.2 ones from Lean before the change) has exactly the bytes
+  it had before, with the same exact and kernel digests. Existing files
+  read as before.
+- A reader written before the revision declines a file without
+  `isReflexive` ("needs section 7"), because NOREFL is must-understand. It
+  never misreads one, and never rejects one as malformed.
+
+What changed:
+
+| change | where |
+| --- | --- |
+| declaration kind 8: kind 7 without each type's `isReflexive` byte | 5.2 |
+| section 7 NOREFL: empty, must-understand, present iff a kind-8 record exists; with NOREFL every inductive block is kind 8, and FLAGS is present too | 4.1, 5.2, 8.1, 9 |
+| error class `flags-section` covers NOREFL as it covers FLAGS | 4.1, 8.1 |
+| INDEX entry kinds 0-8 | 6a.1 |
+| packer input: a flagged type may leave out `isReflexive`; all or none in an export; a type without flags must carry it | 9.2 |
+| digest tags `0x48` (exact) and `0x58` (kernel) for kind-8 blocks | 9.3, 9.4 |
+| vectors: `norefl`; `norefl-without-section`, `norefl-without-flags`, `norefl-mixed-kind7`, `norefl-section-without-block`, `norefl-section-not-empty`; `enum-decl-kind` now uses kind 9 | 11 |
+
+Size: one byte less per inductive type of a kind-8 block, and 24 bytes of
+directory entry per file.
+
+**R13. Why the format does not fill it in.** Three ways were open: the
+packer computes `isReflexive` and writes kind 7 as before; the file says
+"not given"; or Susz stops carrying the field. Computing it is not a local
+rule. Lean computes it on the block after nested inductives are eliminated:
+`inductive T | node : Array (Nat → T) → T` is reflexive only through the
+auxiliary type that stands for `Array (Nat → T)`, whose constructor's field
+is `Nat → T`. A packer that got this right would carry a part of the
+kernel, and the ndjson digest (section 9.3), which shares no code with the
+packer and keeps only hashes, would need a second copy to agree with it.
+A packer that got it wrong would make a kernel that compares the value
+reject a good file. And a Susz file would hold a field its export does not
+have.
+
+Kernels do not need it: every checker computes `isReflexive` while it
+checks the constructors and only compares it with the export's value. So a
+kind-8 block holds what the export holds, and a checker that reads one
+skips the comparison. Kinds 5 and 7 are unchanged: there the export gave
+the value, and a checker still compares it. Dropping the field for every
+file would change the bytes and digests of every file packed so far, and
+throw away a value that older exports do give; keeping "not given" apart
+from "false" costs one kind and an empty section.
+
+Why a new kind and a marker section, again (R12): a kind-7 record without
+the byte would be misparsed by a reader of Appendix C, and an unknown kind
+alone would make it reject a good file. NOREFL makes it decline. The rule
+is per file, like FLAGS: a Lean either writes the field or does not, and an
+export that mixes the two is refused (exit 1).

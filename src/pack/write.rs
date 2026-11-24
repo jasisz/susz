@@ -332,6 +332,10 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool, threads: usize) -> R
     // not at all.
     let mut flagged = false;
     let mut plain = false;
+    // a block without isReflexive (kind 8) was written: NOREFL goes in too.
+    // A file with NOREFL has no kind-5 or kind-7 block.
+    let mut unrefl = false;
+    let mut refl = false;
     if with_index {
         ix_kind.reserve(nd);
         ix_off.reserve(nd);
@@ -390,12 +394,21 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool, threads: usize) -> R
             let base = sg.di;
             let mut pos = 0usize;
             for d in &so.decls {
-                flagged |= d.kind == 7;
+                flagged |= d.kind == 7 || d.kind == 8;
                 plain |= d.kind == 5;
                 if flagged && plain {
                     return Err(inv!(
                         "inductive types with and without their flags in one export \
                          (declaration {}): every one carries them or none does",
+                        d.di
+                    ));
+                }
+                unrefl |= d.kind == 8;
+                refl |= d.kind == 5 || d.kind == 7;
+                if unrefl && refl {
+                    return Err(inv!(
+                        "inductive types with and without isReflexive in one export \
+                         (declaration {}): every one carries it or none does",
                         d.di
                     ));
                 }
@@ -471,6 +484,9 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool, threads: usize) -> R
     if flagged {
         // empty, so it starts where MAIN does: first in the directory
         dir.push((format::SEC_FLAGS, format::MUST_UNDERSTAND, moff, 0));
+    }
+    if unrefl {
+        dir.push((format::SEC_NOREFL, format::MUST_UNDERSTAND, moff, 0));
     }
     dir.push((format::SEC_MAIN, format::MUST_UNDERSTAND, moff, mlen));
     let poff = sink.total;

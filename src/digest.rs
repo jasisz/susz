@@ -56,6 +56,9 @@ pub mod tag {
     /// An inductive block whose types carry the flags of lean4export 3.2
     /// (0x47, not 0x46: 0x46 + `K_DECL` would be `K_REC`).
     pub const INDUCTIVE_FLAGGED: u8 = 0x47;
+    /// A flagged inductive block whose types do not carry `isReflexive`
+    /// (kind 8).
+    pub const INDUCTIVE_UNREFLEXIVE: u8 = 0x48;
     /// The kernel view's own nodes (spec 9.4): binders without their name
     /// and binder info.
     pub const K_LAM: u8 = 0x2a;
@@ -320,7 +323,8 @@ pub struct IndType {
     pub ctors: Vec<Node>,
     pub num_nested: u64,
     pub is_rec: bool,
-    pub is_reflexive: bool,
+    /// `isReflexive`, if the type carries it.
+    pub is_reflexive: Option<bool>,
     /// The flags of lean4export 3.2, if the type carries them.
     pub flags: Option<crate::format::IndFlags>,
 }
@@ -425,7 +429,9 @@ fn put_type(b: &mut Vec<u8>, t: &IndType) {
     put_nodes(b, &t.ctors);
     put_u64(b, t.num_nested);
     b.push(t.is_rec as u8);
-    b.push(t.is_reflexive as u8);
+    if let Some(r) = t.is_reflexive {
+        b.push(r as u8);
+    }
     if let Some(f) = t.flags {
         for x in f.to_array() {
             b.push(x as u8);
@@ -542,7 +548,9 @@ impl Enc {
             }
             DeclV::Inductive { types, ctors, recs } => {
                 let kernel = self.kernel;
-                let t_ind = if types.first().is_some_and(|t| t.flags.is_some()) {
+                let t_ind = if types.first().is_some_and(|t| t.is_reflexive.is_none()) {
+                    t(tag::INDUCTIVE_UNREFLEXIVE)
+                } else if types.first().is_some_and(|t| t.flags.is_some()) {
                     t(tag::INDUCTIVE_FLAGGED)
                 } else {
                     t_ind
@@ -1472,6 +1480,9 @@ struct Nd {
     /// Whether the inductive blocks so far carry their flags (`None` before
     /// the first): an export carries them on every block or on none.
     flagged_blocks: Option<bool>,
+    /// Whether the inductive blocks so far carry `isReflexive` (`None`
+    /// before the first): an export carries it on every type or on none.
+    reflexive_blocks: Option<bool>,
 }
 
 /// What one line defines.
@@ -1882,8 +1893,13 @@ impl Nd {
                     })?;
                     // the flags of lean4export 3.2: all five or none
                     let flagged = (11..16).any(|i| keys.seen >> i & 1 != 0);
+                    // isReflexive may be left out by a flagged type only
+                    // (Lean since lean4#16595 does not have it)
+                    let reflexive = !flagged || keys.seen >> 10 & 1 != 0;
                     for i in 0..if flagged { 16 } else { 11 } {
-                        keys.need(i)?;
+                        if i != 10 || reflexive {
+                            keys.need(i)?;
+                        }
                     }
                     let flags = flagged.then(|| crate::format::IndFlags::from_array(fl));
                     first[0].get_or_insert(name);
@@ -1896,7 +1912,7 @@ impl Nd {
                         ctors: this.name_list(&cs)?,
                         num_nested: n[2],
                         is_rec: b[1],
-                        is_reflexive: b[2],
+                        is_reflexive: reflexive.then_some(b[2]),
                         flags,
                     });
                     Ok(())
@@ -2022,6 +2038,22 @@ impl Nd {
             ));
         }
         self.flagged_blocks = Some(flagged);
+        let reflexive = types
+            .first()
+            .is_none_or(|t: &IndType| t.is_reflexive.is_some());
+        if types.iter().any(|t| t.is_reflexive.is_some() != reflexive) {
+            return Err(inv(
+                "the types of an inductive block do not agree on carrying isReflexive",
+            ));
+        }
+        if !types.is_empty() {
+            if self.reflexive_blocks.is_some_and(|f| f != reflexive) {
+                return Err(inv(
+                    "inductive types with and without isReflexive in one export",
+                ));
+            }
+            self.reflexive_blocks = Some(reflexive);
+        }
         Ok(Line::Decl(
             DeclV::Inductive { types, ctors, recs },
             first[0].or(first[1]).or(first[2]),
@@ -2180,6 +2212,7 @@ pub fn ndjson_view<B: BufRead>(
         sum: Summary::default(),
         needs_flags: false,
         flagged_blocks: None,
+        reflexive_blocks: None,
     };
     let anon = nd.enc.anon();
     let zero = nd.enc.zero();
