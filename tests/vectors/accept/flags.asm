@@ -70,7 +70,7 @@ section MAIN
 10 1 26                 # expr 30: app expr 29 (bvar 0)
 12 0 0 27 1             # expr 31: forall (_ : bvar 0), expr 30
 12 1 0 9 1              # expr 32: forall {_ : Sort u}, expr 31 (Eq.refl's type)
-@d3 18 7 1 10 1 4 7 0 2 1 1 10 1 11 0 0 0 1 1 0 0 1 1 11 1 4 1 0 10 0 2 0 0   # decl 3: flagged inductive Eq.{u} (isImpredicative 1, isK 1, hasProjections 0, hasEta 0, hasLargeElim 1)
+@d3 18 7 1 10 1 4 7 0 2 1 1 10 1 11 0 0 0 0 1 0 0 1 1 11 1 4 1 0 10 0 2 0 0   # decl 3: flagged inductive Eq.{u} (isImpredicative 0, isK 1, hasProjections 0, hasEta 0, hasLargeElim 1)
 12 0 0 8 10             # expr 33: forall (_ : expr 25), Sort u
 12 1 0 11 1             # expr 34: forall {_ : Sort u}, expr 33 (Quot's type)
 @d4 18 4 12 1 4 1 0     # decl 4: quot Quot.{u} : expr 34, type

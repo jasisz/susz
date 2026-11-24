@@ -170,9 +170,10 @@ counts 17 6 52 10
 /// takes a one-field structure in `Type`.
 const FLAGGED_D2: &str = "@d2 18 7 1 6 1 4 23 0 0 0 1 6 1 7 0 0 0 0 0 1 1 1 1 7 1 4 14 0 6 0 0 1 1 8 2 9 4 5 0 1 6 0 0 1 1 1 7 1 1 0   # decl 2: flagged inductive Ind.{u} (isImpredicative 0, isK 0, hasProjections 1, hasEta 1, hasLargeElim 1)";
 
-/// Decl 3 of [`BASE`] as a flagged block (kind 7): `Eq` with
-/// `isImpredicative`, `isK` and `hasLargeElim`.
-const FLAGGED_D3: &str = "@d3 18 7 1 10 1 4 7 0 2 1 1 10 1 11 0 0 0 1 1 0 0 1 1 11 1 4 1 0 10 0 2 0 0   # decl 3: flagged inductive Eq.{u} (isImpredicative 1, isK 1, hasProjections 0, hasEta 0, hasLargeElim 1)";
+/// Decl 3 of [`BASE`] as a flagged block (kind 7): `Eq` with `isK` and
+/// `hasLargeElim`, as lean4export 3.2 writes it. Not `isImpredicative`: an
+/// impredicative type has no large elimination, so kernels reject that.
+const FLAGGED_D3: &str = "@d3 18 7 1 10 1 4 7 0 2 1 1 10 1 11 0 0 0 0 1 0 0 1 1 11 1 4 1 0 10 0 2 0 0   # decl 3: flagged inductive Eq.{u} (isImpredicative 0, isK 1, hasProjections 0, hasEta 0, hasLargeElim 1)";
 
 /// [`BASE`] with both inductive blocks (`Ind`, `Eq`) flagged and the FLAGS
 /// section: with FLAGS, every inductive block is kind 7.
