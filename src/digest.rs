@@ -1469,6 +1469,9 @@ struct Nd {
     /// The header's format.version is 3.2.x: every inductive type carries
     /// its flags.
     needs_flags: bool,
+    /// Whether the inductive blocks so far carry their flags (`None` before
+    /// the first): an export carries them on every block or on none.
+    flagged_blocks: Option<bool>,
 }
 
 /// What one line defines.
@@ -2013,6 +2016,12 @@ impl Nd {
                 "an inductive type without its flags in a format 3.2 export",
             ));
         }
+        if self.flagged_blocks.is_some_and(|f| f != flagged) {
+            return Err(inv(
+                "inductive types with and without their flags in one export",
+            ));
+        }
+        self.flagged_blocks = Some(flagged);
         Ok(Line::Decl(
             DeclV::Inductive { types, ctors, recs },
             first[0].or(first[1]).or(first[2]),
@@ -2170,6 +2179,7 @@ pub fn ndjson_view<B: BufRead>(
         ids: Vec::new(),
         sum: Summary::default(),
         needs_flags: false,
+        flagged_blocks: None,
     };
     let anon = nd.enc.anon();
     let zero = nd.enc.zero();

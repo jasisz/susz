@@ -327,8 +327,11 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool, threads: usize) -> R
     let mut ix_kind: Vec<u8> = Vec::new();
     let mut ix_off: Vec<u64> = Vec::new();
     let mut ix_blen: Vec<u64> = Vec::new();
-    // a flagged inductive block (kind 7) was written: FLAGS goes in
+    // a flagged inductive block (kind 7) was written: FLAGS goes in. A file
+    // with FLAGS has no kind-5 block, so the export is flagged throughout or
+    // not at all.
     let mut flagged = false;
+    let mut plain = false;
     if with_index {
         ix_kind.reserve(nd);
         ix_off.reserve(nd);
@@ -388,6 +391,14 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool, threads: usize) -> R
             let mut pos = 0usize;
             for d in &so.decls {
                 flagged |= d.kind == 7;
+                plain |= d.kind == 5;
+                if flagged && plain {
+                    return Err(inv!(
+                        "inductive types with and without their flags in one export \
+                         (declaration {}): every one carries them or none does",
+                        d.di
+                    ));
+                }
                 if with_index {
                     sink.put(&main[pos..d.off])?;
                     pos = d.off;

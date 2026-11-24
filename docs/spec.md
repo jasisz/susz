@@ -152,7 +152,7 @@ end-magic = 5A 53 55 53                                           ; "ZSUS"
 | 3 | SOURCE | no | no | the source export's `meta` object, verbatim UTF-8 JSON (A.10) |
 | 4 | PAD | no | no | zero bytes, for alignment; MUST be all `0x00` |
 | 5 | INDEX | no | no (written by default, `--no-index` omits it) | declaration index and name table (section 6a) |
-| 6 | FLAGS | yes | iff some kind-7 declaration exists | none: the section MUST be empty (length 0) |
+| 6 | FLAGS | yes | iff some kind-7 declaration exists (then no kind-5 one does) | none: the section MUST be empty (length 0) |
 | 7..0x7FFF | reserved | | | |
 | 0x8000..0xFFFF | private / experimental | | | never in canonical files |
 
@@ -181,8 +181,10 @@ end-magic = 5A 53 55 53                                           ; "ZSUS"
   with kind-7 records ("needs section 6") instead of rejecting it for an
   unknown declaration kind. A FLAGS section of non-zero length is a
   structural error (class `flags-section`) at its entry's length field. A
-  kind-7 record in a file without FLAGS, and FLAGS in a file without a
-  kind-7 record, are structural errors of the same class (section 8.1).
+  kind-7 record in a file without FLAGS, a kind-5 record in a file with
+  FLAGS, and FLAGS in a file without a kind-7 record, are structural errors
+  of the same class (section 8.1). So with FLAGS every inductive block is
+  kind 7, and without it every one is kind 5.
 
 ## 5. MAIN section
 
@@ -277,7 +279,11 @@ checks that each one is allowed for the type and does not recompute them.
 A kind-7 block carries them, a kind-5 block does not. The two are different
 declarations: "no flags" (a checker decides as before the renovation) is not
 "every flag off". The flags belong to the block as a whole, so its types
-either all carry them (kind 7) or none does (kind 5). A recursor may have
+either all carry them (kind 7) or none does (kind 5). The same holds for
+the file: with FLAGS every inductive block is kind 7, without it every one
+is kind 5 (section 4.1). A kernel never checks one environment by two sets
+of rules, such as an `Acc` with large elimination admitted by the old rules
+next to types whose flags were checked by the new ones. A recursor may have
 no rules (`rules` count 0), in either kind: with the flags, a recursor that
 eliminates only into `Prop` (no `hasLargeElim`) has none. The format checks
 no relation between the flags, the recursors' `k` and the rest; that is the
@@ -508,8 +514,9 @@ it finds.
    declared twice when its name field is read, before the fields after it.
    A kind-6 record whose block would run past the end of PROOFS, or that has
    no PROOFS section at all, is an error at that record, of class
-   `proofs-fill`. A kind-7 record in a file without FLAGS is an error at
-   that record, of class `flags-section`, found right after its kind byte.
+   `proofs-fill`. A kind-7 record in a file without FLAGS, and a kind-5
+   record in a file with FLAGS, are errors at that record, of class
+   `flags-section`, found right after its kind byte.
 6. After the last MAIN record, the trailer counts: the first one that
    differs from what MAIN defines (names, levels, expressions,
    declarations), at that count. Before this point a reader uses the counts
@@ -574,7 +581,9 @@ packers produce identical bytes.
   id order.
 - An inductive block whose types carry the five flags in the export is
   written as kind 7, any other as kind 5. A packer never adds or computes
-  flags, and never drops them.
+  flags, and never drops them. Since the types of an export carry flags all
+  or none (section 9.2), a packed file has only kind-7 blocks (with FLAGS)
+  or only kind-5 blocks (without).
 - INDEX is written by default and left out with `--no-index`. Every
   canonical packer has this option.
 - SOURCE is always written. It holds the source export's `meta` object, byte
@@ -617,7 +626,8 @@ accepted dialect is fixed here.
 - Every other line is one record with exactly the keys of its lean4export
   3.1 kind. An object in `inductive.types` may also have the five keys of
   3.2, `isImpredicative`, `isK`, `hasProjections`, `hasEta` and
-  `hasLargeElim` (booleans): all five or none.
+  `hasLargeElim` (booleans): all five or none. If one inductive type of the
+  export carries them, every one MUST.
 - Flags are read where they are, not by the version: a 3.1.x export whose
   types carry them packs as a 3.2.x one does, but for SOURCE. The version
   only adds one rule: in a 3.2.x export every inductive type MUST carry its
@@ -632,9 +642,9 @@ A packer refuses an input in one of two classes. The `susz` tool exits with
   short, a missing or repeated key, a negative number, an id defined twice or
   used before it is defined, a name declared twice (compared by value), a
   declaration of the anonymous name, an empty input, an inductive type with
-  some of the five flag keys but not all, an inductive block whose types do
-  not agree on carrying flags, and an inductive type without its flags in a
-  3.2.x export.
+  some of the five flag keys but not all, inductive types with and without
+  flags in one export (in one block or in different blocks), and an
+  inductive type without its flags in a 3.2.x export.
 - **Cannot pack** (exit 2). The input may be a fine export, but this packer
   cannot write it. Examples are a header in another form, another
   `format.version`, a record kind or key outside lean4export 3.1 and 3.2, a number
@@ -900,7 +910,8 @@ byte on every corpus file, for each setting.
   constant declared after T and with T itself; duplicate declared name
   (across records and inside one block); a declaration of the anonymous name;
   `block-exprs` of 2^32; PAD with a non-zero byte; a kind-7 record without
-  FLAGS; FLAGS without a kind-7 record; FLAGS not empty; a flag byte 2;
+  FLAGS; a kind-5 record with FLAGS; FLAGS without a kind-7 record; FLAGS
+  not empty; a flag byte 2;
   declaration kind 8. The rule P vectors are
   declaration failures, not malformed files, but they sit with the reject
   vectors because the outcome is rejected.
@@ -946,7 +957,7 @@ These choices date from 2026-11-12.
 | A.12 | conformance pins error location | yes (section, record offset) | outcome only |
 | A.13 | duplicate frontier entries | rejected | allowed |
 | A.14 | `minor` version field | none (sections announce features) | u16 minor, informational |
-| A.15 | inductive flags (lean4export 3.2) | declaration kind 7, announced by an empty must-understand FLAGS section | a flags byte in kind 5 (breaks old readers silently); flags in FLAGS as a side table (a subset reader would need the type's ordinal); major 2 |
+| A.15 | inductive flags (lean4export 3.2) | declaration kind 7, announced by an empty must-understand FLAGS section; with FLAGS every inductive block is kind 7 | a flags byte in kind 5 (breaks old readers silently); flags in FLAGS as a side table (a subset reader would need the type's ordinal); kind 5 and kind 7 mixed in one file; major 2 |
 
 ### Why
 
@@ -1127,11 +1138,12 @@ What changed:
 | --- | --- |
 | declaration kind 7: kind 5 with five bools after each type's `isReflexive` | 5.2 |
 | section 6 FLAGS: empty, must-understand, present iff a kind-7 record exists | 4.1, 8.1, 9 |
+| with FLAGS every inductive block is kind 7: a kind-5 record there is an error | 4.1, 5.2, 8.1 |
 | error class `flags-section` | 4.1, 8.1 |
 | INDEX entry kinds 0-7 | 6a.1 |
-| packer input: 3.2.x headers; the five keys, all or none; 3.2.x requires them | 9.2 |
+| packer input: 3.2.x headers; the five keys, all or none, on every inductive type of the export or on none; 3.2.x requires them | 9.2 |
 | digest tags `0x47` (exact) and `0x57` (kernel) for flagged blocks | 9.3, 9.4 |
-| vectors: `flags`; `flags-without-section`, `flags-section-without-block`, `flags-section-not-empty`, `flags-bool-2`; `enum-decl-kind` now uses kind 8 | 11 |
+| vectors: `flags`; `flags-without-section`, `flags-mixed-kind5`, `flags-section-without-block`, `flags-section-not-empty`, `flags-bool-2`; `enum-decl-kind` now uses kind 8 | 11 |
 
 Size: 5 bytes per inductive type of a flagged block, and 24 bytes of
 directory entry per file.
@@ -1149,4 +1161,16 @@ as the kernel needs: without flags it decides by the old rules. The
 `format.version` of SOURCE is informational (section 4.1); the rule that a
 3.2.x export carries flags everywhere is enforced where the version is
 read, by the packer and the ndjson digest (section 9.2).
+
+A file is flagged as a whole, not block by block: with FLAGS every
+inductive block is kind 7. Kernels that take the flags check every
+inductive type by the new rules, and a kind-5 block among kind-7 ones would
+have to be checked by the old ones in the same environment. That is unsound
+in general: an old-rule `Acc` with large elimination next to types whose
+flags were checked by the new rules is not what either set of rules
+admits. Kernels already refuse such a file, so the format makes it a
+structural error (`flags-section`, at the kind-5 record), and the packer
+and the ndjson digest refuse an export whose types do not all agree on
+carrying flags (exit 1). A slice of a file with FLAGS keeps FLAGS whenever
+it keeps an inductive block, and keeps every block kind 7.
 

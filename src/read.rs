@@ -87,7 +87,8 @@ pub enum Class {
     /// The file goes past one of this reader's own limits (declined).
     Limit,
     /// FLAGS and the flagged inductive blocks (kind 7) disagree: a kind-7
-    /// declaration without FLAGS, FLAGS without one, or FLAGS not empty.
+    /// declaration without FLAGS, a kind-5 declaration with FLAGS, FLAGS
+    /// without a kind-7 one, or FLAGS not empty.
     FlagsSection,
 }
 
@@ -1428,6 +1429,11 @@ impl<'a> Main<'a> {
                         ));
                     }
                     self.flagged = true;
+                } else if self.flags.is_some() {
+                    return Err((
+                        Class::FlagsSection,
+                        "an inductive block without flags in a file with FLAGS".into(),
+                    ));
                 }
                 let nt = c.count(10)?;
                 let mut types = Vec::with_capacity(nt as usize);

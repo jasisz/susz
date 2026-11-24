@@ -308,6 +308,54 @@ fn packer_api_carries_flags() {
     }
 }
 
+// An export is flagged throughout or not at all: inductive types with and
+// without flags in different blocks are refused (exit 1) by the packer, the
+// record API and the digest, in either order.
+#[test]
+fn mixed_blocks_are_refused() {
+    let head = "{\"meta\":{\"exporter\":{\"name\":\"t\",\"version\":\"0\"},\"format\":{\"version\":\"3.1.0\"}}}\n\
+{\"in\":1,\"str\":{\"pre\":0,\"str\":\"A\"}}\n\
+{\"in\":2,\"str\":{\"pre\":0,\"str\":\"B\"}}\n\
+{\"ie\":0,\"sort\":0}\n";
+    let ind = |n: u64, flags: bool| {
+        format!(
+            "{{\"inductive\":{{\"ctors\":[],\"recs\":[],\"types\":[{{\"all\":[{n}],\"ctors\":[],{}\"isRec\":false,\"isReflexive\":false,\"isUnsafe\":false,\"levelParams\":[],\"name\":{n},\"numIndices\":0,\"numNested\":0,\"numParams\":0,\"type\":0}}]}}}}\n",
+            if flags { FLAG_KEYS } else { "" }
+        )
+    };
+    // both flagged, or neither: packed
+    for f in [false, true] {
+        let text = format!("{head}{}{}", ind(1, f), ind(2, f));
+        let bytes = pack("same", &text).unwrap();
+        assert_eq!(has_flags_section(&bytes), f);
+        assert!(blocks(&bytes).iter().all(|b| b.0 == if f { 7 } else { 5 }));
+        assert_eq!(unpacked(&bytes), text);
+    }
+    for first in [false, true] {
+        let text = format!("{head}{}{}", ind(1, first), ind(2, !first));
+        let e = pack("mixed", &text).unwrap_err();
+        assert_eq!(e.fault, Fault::Invalid, "{}", e.msg);
+        assert!(matches!(
+            nd_digest(&text, View::Exact),
+            Err(digest::Error::Invalid { .. })
+        ));
+        let f = IndFlags::default();
+        let mut p = packer("3.1.0");
+        for (n, x) in [(1, first), (2, !first)] {
+            p.decl(&Decl::Inductive {
+                types: vec![ty(n, vec![n], x.then_some(f))],
+                ctors: vec![],
+                recs: vec![],
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            p.to_vec(&Options::default()).unwrap_err().fault,
+            Fault::Invalid
+        );
+    }
+}
+
 // Another major version of the format is still declined, and a version
 // other than 3.1 and 3.2 still cannot be packed.
 #[test]
@@ -330,4 +378,6 @@ fn slice_keeps_flags() {
     };
     let (out, _) = susz::slice::slice_to_vec(&bytes, &opts).unwrap();
     assert_eq!(out, bytes);
+    assert!(has_flags_section(&out));
+    assert!(blocks(&out).iter().all(|b| b.0 == 7));
 }

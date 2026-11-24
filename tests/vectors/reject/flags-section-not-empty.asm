@@ -71,7 +71,7 @@ section MAIN
 10 1 26                 # expr 30: app expr 29 (bvar 0)
 12 0 0 27 1             # expr 31: forall (_ : bvar 0), expr 30
 12 1 0 9 1              # expr 32: forall {_ : Sort u}, expr 31 (Eq.refl's type)
-@d3 18 5 1 10 1 4 7 0 2 1 1 10 1 11 0 0 0 1 11 1 4 1 0 10 0 2 0 0   # decl 3: inductive Eq.{u}, Eq.refl.{u}, no recursor
+@d3 18 7 1 10 1 4 7 0 2 1 1 10 1 11 0 0 0 1 1 0 0 1 1 11 1 4 1 0 10 0 2 0 0   # decl 3: flagged inductive Eq.{u} (isImpredicative 1, isK 1, hasProjections 0, hasEta 0, hasLargeElim 1)
 12 0 0 8 10             # expr 33: forall (_ : expr 25), Sort u
 12 1 0 11 1             # expr 34: forall {_ : Sort u}, expr 33 (Quot's type)
 @d4 18 4 12 1 4 1 0     # decl 4: quot Quot.{u} : expr 34, type
@@ -121,7 +121,7 @@ section INDEX
 0 rel:MAIN:d0           # entry 0
 1 rel:d0:d1             # entry 1
 7 rel:d1:d2
-5 rel:d2:d3             # entry 3
+7 rel:d2:d3
 4 rel:d3:d4             # entry 4
 0 rel:d4:d5             # entry 5
 3 rel:d5:d6             # entry 6

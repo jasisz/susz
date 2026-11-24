@@ -170,12 +170,22 @@ counts 17 6 52 10
 /// takes a one-field structure in `Type`.
 const FLAGGED_D2: &str = "@d2 18 7 1 6 1 4 23 0 0 0 1 6 1 7 0 0 0 0 0 1 1 1 1 7 1 4 14 0 6 0 0 1 1 8 2 9 4 5 0 1 6 0 0 1 1 1 7 1 1 0   # decl 2: flagged inductive Ind.{u} (isImpredicative 0, isK 0, hasProjections 1, hasEta 1, hasLargeElim 1)";
 
-/// [`BASE`] with `Ind` as a flagged block and the FLAGS section.
+/// Decl 3 of [`BASE`] as a flagged block (kind 7): `Eq` with
+/// `isImpredicative`, `isK` and `hasLargeElim`.
+const FLAGGED_D3: &str = "@d3 18 7 1 10 1 4 7 0 2 1 1 10 1 11 0 0 0 1 1 0 0 1 1 11 1 4 1 0 10 0 2 0 0   # decl 3: flagged inductive Eq.{u} (isImpredicative 1, isK 1, hasProjections 0, hasEta 0, hasLargeElim 1)";
+
+/// [`BASE`] with both inductive blocks (`Ind`, `Eq`) flagged and the FLAGS
+/// section: with FLAGS, every inductive block is kind 7.
 fn flagged() -> String {
     let s = BASE.replacen("section MAIN", "section FLAGS\nsection MAIN", 1);
     mutate(
         &s,
-        &[("@d2 18 5", FLAGGED_D2), ("5 rel:d1:d2", "7 rel:d1:d2")],
+        &[
+            ("@d2 18 5", FLAGGED_D2),
+            ("5 rel:d1:d2", "7 rel:d1:d2"),
+            ("@d3 18 5", FLAGGED_D3),
+            ("5 rel:d2:d3", "7 rel:d2:d3"),
+        ],
     )
 }
 
@@ -343,7 +353,7 @@ pub fn all() -> Vec<Vector> {
         "flags",
         header_note(
             &flagged,
-            "Ind as a flagged inductive block (kind 7, lean4export 3.2), with FLAGS.",
+            "Ind and Eq as flagged inductive blocks (kind 7, lean4export 3.2), with FLAGS.",
         ),
         Want::Accept,
     );
@@ -631,11 +641,26 @@ pub fn all() -> Vec<Vector> {
         ),
         Want::Reject(FlagsSection, Marked),
     );
+    let base_d3 = BASE.lines().find(|l| l.starts_with("@d3 18 5")).unwrap();
+    add(
+        "flags-mixed-kind5",
+        header_note(
+            &mutate(
+                &flagged,
+                &[
+                    ("@d3 18 7", &format!("! {base_d3}")),
+                    ("7 rel:d2:d3", "5 rel:d2:d3"),
+                ],
+            ),
+            "an inductive block without flags (kind 5) in a file with FLAGS.",
+        ),
+        Want::Reject(FlagsSection, Marked),
+    );
     add(
         "flags-section-without-block",
         header_note(
-            &BASE.replacen("section MAIN", "section FLAGS\nsection MAIN", 1),
-            "FLAGS without a flagged inductive block.",
+            &MINIMAL.replacen("section MAIN", "section FLAGS\nsection MAIN", 1),
+            "FLAGS without a flagged inductive block (no inductive block at all).",
         ),
         Want::Reject(FlagsSection, SectionAt(format::SEC_FLAGS, 0)),
     );
