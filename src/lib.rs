@@ -1,4 +1,4 @@
-//! Susz 1: a binary form of a Lean 4 kernel export (lean4export 3.1).
+//! Susz 1: a binary form of a Lean 4 kernel export (lean4export 3.1 and 3.2).
 //!
 //! - [`pack`]: lean4export ndjson to canonical Susz 1 bytes.
 //! - [`read`]: the reader. [`read::decode`] reads a file in one pass into

@@ -4,7 +4,10 @@
 
 Susz is a binary format for Lean 4 kernel exports. It holds the same thing as
 a [lean4export](https://github.com/leanprover/lean4export) 3.1 ndjson file,
-just without the JSON.
+just without the JSON. Exports in format 3.2, whose inductive types carry the
+five flags of the kernel renovation ([lean4#16595](https://github.com/leanprover/lean4/pull/16595)),
+are packed too: their blocks keep the flags, kept apart from blocks without
+them (spec, sections 5.2 and 9.2).
 
 Why bother:
 
@@ -440,6 +443,11 @@ for each rule a copy of one of them broken in exactly that way, with the error
 it should give. The declarations in them are real ones a kernel accepts
 (checked with [Pestka](https://github.com/jasisz/pestka)), so you can run a
 full checker on them, not just a reader.
+
+`tests/renovation/` holds two format 3.2 exports from
+lean-kernel-arena's renovation tests (SBool, LAnd); `tests/renovation.rs`
+checks that the flags are packed, read, unpacked and digested, and that a
+3.2 export without them is refused.
 
 `tests/corpus/init-prelude.ndjson.gz` is a lean4export export of Lean's
 `Init.Prelude` (see [tests/corpus/README.md](tests/corpus/README.md)). The

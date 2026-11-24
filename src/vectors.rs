@@ -165,6 +165,20 @@ x:7b2274657374223a747275657d    # {"test":true}
 counts 17 6 52 10
 "#;
 
+/// Decl 2 of [`BASE`] as a flagged block (kind 7): `Ind` with
+/// `hasProjections`, `hasEta` and `hasLargeElim`, as the renovated kernel
+/// takes a one-field structure in `Type`.
+const FLAGGED_D2: &str = "@d2 18 7 1 6 1 4 23 0 0 0 1 6 1 7 0 0 0 0 0 1 1 1 1 7 1 4 14 0 6 0 0 1 1 8 2 9 4 5 0 1 6 0 0 1 1 1 7 1 1 0   # decl 2: flagged inductive Ind.{u} (isImpredicative 0, isK 0, hasProjections 1, hasEta 1, hasLargeElim 1)";
+
+/// [`BASE`] with `Ind` as a flagged block and the FLAGS section.
+fn flagged() -> String {
+    let s = BASE.replacen("section MAIN", "section FLAGS\nsection MAIN", 1);
+    mutate(
+        &s,
+        &[("@d2 18 5", FLAGGED_D2), ("5 rel:d1:d2", "7 rel:d1:d2")],
+    )
+}
+
 const MINIMAL: &str = r#"# Susz 1 test vector: one axiom.
 section MAIN
 1 0 s:"A"               # name 1: A
@@ -324,6 +338,15 @@ pub fn all() -> Vec<Vector> {
     );
     let pad = BASE.replace("section SOURCE", "section PAD\nx:00000000\nsection SOURCE");
     add("pad", header_note(&pad, "a PAD section."), Want::Accept);
+    let flagged = flagged();
+    add(
+        "flags",
+        header_note(
+            &flagged,
+            "Ind as a flagged inductive block (kind 7, lean4export 3.2), with FLAGS.",
+        ),
+        Want::Accept,
+    );
 
     // decline
     let m =
@@ -509,7 +532,7 @@ pub fn all() -> Vec<Vector> {
         r("nat-nonminimal", "a nat with a trailing zero byte.", "14 nat:0                # expr 2", "! 14 natx:00            # expr 2", NatNonMinimal),
         r("bool-2", "a bool byte 2.", "@d0 18 0 1 0 2 0", "! @d0 18 0 1 0 2 2", Bool),
         r("enum-binder", "binder 4.", "11 0 0 19 1             # expr 20", "! 11 4 0 19 1           # expr 20", Enum),
-        r("enum-decl-kind", "declaration kind 7.", "@d0 18 0 1 0 2 0", "! @d0 18 7 1 0 2 0", Enum),
+        r("enum-decl-kind", "declaration kind 8.", "@d0 18 0 1 0 2 0", "! @d0 18 8 1 0 2 0", Enum),
         r("enum-hints", "hints 3.", "@d1 18 1 2 0 2 1 2 1 0 1 2", "! @d1 18 1 2 0 2 1 3 1 0 1 2", Enum),
         r("enum-safety", "safety 3.", "@d1 18 1 2 0 2 1 2 1 0 1 2", "! @d1 18 1 2 0 2 1 2 1 3 1 2", Enum),
         r("enum-quot-kind", "quotient kind 4.", "@d4 18 4 12 1 4 1 0", "! @d4 18 4 12 1 4 1 4", Enum),
@@ -593,6 +616,50 @@ pub fn all() -> Vec<Vector> {
             )],
         ),
         Want::Reject(ProofsFill, SectionAt(format::SEC_PROOFS, u64::MAX)),
+    );
+    add(
+        "flags-without-section",
+        header_note(
+            &mutate(
+                &flagged,
+                &[
+                    ("section FLAGS", ""),
+                    ("@d2 18 7", &format!("! {FLAGGED_D2}")),
+                ],
+            ),
+            "a flagged inductive block in a file without FLAGS.",
+        ),
+        Want::Reject(FlagsSection, Marked),
+    );
+    add(
+        "flags-section-without-block",
+        header_note(
+            &BASE.replacen("section MAIN", "section FLAGS\nsection MAIN", 1),
+            "FLAGS without a flagged inductive block.",
+        ),
+        Want::Reject(FlagsSection, SectionAt(format::SEC_FLAGS, 0)),
+    );
+    add(
+        "flags-section-not-empty",
+        header_note(
+            &flagged.replace("section FLAGS", "section FLAGS\nx:00"),
+            "FLAGS holds a byte.",
+        ),
+        Want::Reject(FlagsSection, Entry(0, 16)),
+    );
+    add(
+        "flags-bool-2",
+        header_note(
+            &mutate(
+                &flagged,
+                &[(
+                    "@d2 18 7",
+                    &format!("! {}", FLAGGED_D2.replace("0 0 1 1 1 1 7", "0 0 1 1 2 1 7")),
+                )],
+            ),
+            "a flag byte 2 (hasLargeElim).",
+        ),
+        Want::Reject(Bool, Marked),
     );
     add(
         "proofs-without-blocks",

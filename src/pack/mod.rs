@@ -1,4 +1,4 @@
-//! The packer: lean4export 3.1 ndjson to canonical Susz 1 (spec section 9).
+//! The packer: lean4export 3.1 or 3.2 ndjson to canonical Susz 1 (spec section 9).
 //!
 //! Reading lines fills columns of expressions and a stream of the other
 //! records (`pk`, `lines`, `par`); a walk back from the last expression
@@ -13,7 +13,8 @@ pub(crate) mod pk;
 mod write;
 
 pub use api::{
-    Binder, Decl, Head, Hints, IndCtor, IndRec, IndRule, IndType, Packer, QuotKind, Safety,
+    Binder, Decl, Head, Hints, IndCtor, IndFlags, IndRec, IndRule, IndType, Packer, QuotKind,
+    Safety,
 };
 use std::fmt;
 

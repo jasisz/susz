@@ -445,6 +445,11 @@ impl Emit<'_> {
                             kv("isRec", J::Bool(t.is_rec)),
                             kv("isReflexive", J::Bool(t.is_reflexive)),
                         ]);
+                        if let Some(f) = t.flags {
+                            for (k, x) in crate::format::IndFlags::KEYS.iter().zip(f.to_array()) {
+                                o.push(kv(k, J::Bool(x)));
+                            }
+                        }
                         J::Obj(o)
                     })
                     .collect();

@@ -327,6 +327,8 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool, threads: usize) -> R
     let mut ix_kind: Vec<u8> = Vec::new();
     let mut ix_off: Vec<u64> = Vec::new();
     let mut ix_blen: Vec<u64> = Vec::new();
+    // a flagged inductive block (kind 7) was written: FLAGS goes in
+    let mut flagged = false;
     if with_index {
         ix_kind.reserve(nd);
         ix_off.reserve(nd);
@@ -385,6 +387,7 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool, threads: usize) -> R
             let base = sg.di;
             let mut pos = 0usize;
             for d in &so.decls {
+                flagged |= d.kind == 7;
                 if with_index {
                     sink.put(&main[pos..d.off])?;
                     pos = d.off;
@@ -453,8 +456,12 @@ pub fn write<W: Write>(pk: Pk, w: &mut W, with_index: bool, threads: usize) -> R
     cols.give_back();
     super::give_back(std::mem::take(&mut pk.owner));
     let mlen = sink.total - moff;
-    let mut dir: Vec<(u16, u16, u64, u64)> =
-        vec![(format::SEC_MAIN, format::MUST_UNDERSTAND, moff, mlen)];
+    let mut dir: Vec<(u16, u16, u64, u64)> = Vec::new();
+    if flagged {
+        // empty, so it starts where MAIN does: first in the directory
+        dir.push((format::SEC_FLAGS, format::MUST_UNDERSTAND, moff, 0));
+    }
+    dir.push((format::SEC_MAIN, format::MUST_UNDERSTAND, moff, mlen));
     let poff = sink.total;
     let plen = proofs.len() as u64;
     if lazy > 0 {
