@@ -310,10 +310,18 @@ checks the constructors (on the block with its nested types eliminated),
 and checkers compare their own value with the export's. Lean dropped the
 field from `InductiveVal` with the renovation (lean4#16595), and its
 exports no longer write it. A kind-8 block keeps what such an export
-says, and nothing more: its types have no `isReflexive`, and a checker
-computes it and has nothing to compare it with. Kinds 5 and 7 keep the
-value the export gave, which a checker still compares. "Not given" is not
-"false". As with the flags, a file is one or the other as a whole: with
+says, and nothing more: its types have no `isReflexive`, and there is
+nothing to compare with. A kernel MAY compute `isReflexive` where it needs
+it (from the constructors, as Lean does); a reader MUST NOT treat a missing
+value as `false`. Kinds 5 and 7 keep the value the export gave, which a
+checker still compares. "Not given" is not "false".
+
+Kind 7 is transitional. It holds exports of the Lean versions that wrote
+the flags and still wrote `isReflexive` (lean4export 3.2 from earlier
+builds of the renovation, lean4#16595). Packers keep writing it for such exports and
+readers keep reading it, but exports of current Lean pack to kind 8, and a
+later revision of the format MAY retire kind 7 once no supported Lean
+writes it. Kind 5 is not transitional: it holds every 3.1 export. As with the flags, a file is one or the other as a whole: with
 NOREFL every inductive block is kind 8 (section 4.1). Only flagged blocks
 come without it, because only the renovation's exports leave it out; an
 unflagged block without `isReflexive` has no kind.
@@ -1252,6 +1260,7 @@ What changed:
 | INDEX entry kinds 0-8 | 6a.1 |
 | packer input: a flagged type may leave out `isReflexive`; all or none in an export; a type without flags must carry it | 9.2 |
 | digest tags `0x48` (exact) and `0x58` (kernel) for kind-8 blocks | 9.3, 9.4 |
+| kind 7 marked transitional; a kernel MAY compute `isReflexive` where it needs it, never reads a missing one as `false` | 5.2 |
 | vectors: `norefl`; `norefl-without-section`, `norefl-without-flags`, `norefl-mixed-kind7`, `norefl-section-without-block`, `norefl-section-not-empty`; `enum-decl-kind` now uses kind 9 | 11 |
 
 Size: one byte less per inductive type of a kind-8 block, and 24 bytes of
@@ -1270,8 +1279,9 @@ A packer that got it wrong would make a kernel that compares the value
 reject a good file. And a Susz file would hold a field its export does not
 have.
 
-Kernels do not need it: every checker computes `isReflexive` while it
-checks the constructors and only compares it with the export's value. So a
+Kernels do not need it as input: a kernel that uses `isReflexive` MAY
+compute it from the constructors where it needs it, and a checker that only
+compared it with the export's value has nothing to compare. So a
 kind-8 block holds what the export holds, and a checker that reads one
 skips the comparison. Kinds 5 and 7 are unchanged: there the export gave
 the value, and a checker still compares it. Dropping the field for every
