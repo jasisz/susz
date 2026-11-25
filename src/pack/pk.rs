@@ -897,6 +897,17 @@ impl Pk {
                         "the types of an inductive block do not agree on carrying their flags"
                     ));
                 }
+                let reflexive = types.first().is_none_or(|t| t.is_reflexive.is_some());
+                if types.iter().any(|t| t.is_reflexive.is_some() != reflexive) {
+                    return Err(inv!(
+                        "the types of an inductive block do not agree on carrying isReflexive"
+                    ));
+                }
+                if !reflexive && !flagged {
+                    return Err(inv!(
+                        "an inductive type without isReflexive and without its flags"
+                    ));
+                }
                 if self.needs_flags && !flagged && !types.is_empty() {
                     return Err(inv!(
                         "an inductive type without its flags in a format 3.2 export"
@@ -912,7 +923,9 @@ impl Pk {
                     self.dnms(&t.ctors)?;
                     self.dv(t.num_nested);
                     self.dbyte(t.is_rec as u8);
-                    self.dbyte(t.is_reflexive as u8);
+                    if let Some(r) = t.is_reflexive {
+                        self.dbyte(r as u8);
+                    }
                     if let Some(f) = t.flags {
                         for x in f.to_array() {
                             self.dbyte(x as u8);
@@ -947,7 +960,9 @@ impl Pk {
                     }
                     self.dbyte(r.k as u8);
                 }
-                if flagged {
+                if !reflexive {
+                    8
+                } else if flagged {
                     7
                 } else {
                     5
@@ -1226,8 +1241,16 @@ impl Pk {
                     ];
                     // the flags of lean4export 3.2: all five or none
                     let fk = IndFlags::KEYS;
-                    let flags = if fk.iter().any(|k| json::has(t, k)) {
-                        let mut keys = BASE.to_vec();
+                    // isReflexive may be left out by a type with the flags
+                    // (Lean since lean4#16595 does not have it)
+                    let flagged = fk.iter().any(|k| json::has(t, k));
+                    let reflexive = !flagged || json::has(t, "isReflexive");
+                    let mut base = BASE.to_vec();
+                    if !reflexive {
+                        base.retain(|k| *k != "isReflexive");
+                    }
+                    let flags = if flagged {
+                        let mut keys = base.clone();
                         keys.extend_from_slice(&fk);
                         json::exact(t, &keys)?;
                         let mut a = [false; 5];
@@ -1236,7 +1259,7 @@ impl Pk {
                         }
                         Some(IndFlags::from_array(a))
                     } else {
-                        json::exact(t, &BASE)?;
+                        json::exact(t, &base)?;
                         None
                     };
                     types.push(IndType {
@@ -1248,7 +1271,11 @@ impl Pk {
                         ctors: json::ints(t, "ctors")?,
                         num_nested: json::int(t, "numNested")?,
                         is_rec: json::boolean(t, "isRec")?,
-                        is_reflexive: json::boolean(t, "isReflexive")?,
+                        is_reflexive: if reflexive {
+                            Some(json::boolean(t, "isReflexive")?)
+                        } else {
+                            None
+                        },
                         flags,
                     });
                 }

@@ -190,6 +190,50 @@ fn flagged() -> String {
     )
 }
 
+/// [`FLAGGED_D2`] as kind 8: the same block without `isReflexive`, as Lean
+/// writes it since lean4#16595.
+fn unrefl_d2() -> String {
+    FLAGGED_D2
+        .replacen("@d2 18 7", "@d2 18 8", 1)
+        .replacen("1 6 1 7 0 0 0 0 0 1 1 1", "1 6 1 7 0 0 0 0 1 1 1", 1)
+        .replacen(
+            "# decl 2: flagged inductive",
+            "# decl 2: flagged inductive without isReflexive",
+            1,
+        )
+}
+
+/// [`FLAGGED_D3`] as kind 8.
+fn unrefl_d3() -> String {
+    FLAGGED_D3
+        .replacen("@d3 18 7", "@d3 18 8", 1)
+        .replacen("1 10 1 11 0 0 0 0 1 0 0 1", "1 10 1 11 0 0 0 1 0 0 1", 1)
+        .replacen(
+            "# decl 3: flagged inductive",
+            "# decl 3: flagged inductive without isReflexive",
+            1,
+        )
+}
+
+/// [`BASE`] with both inductive blocks as kind 8 (flagged, without
+/// `isReflexive`) and the FLAGS and NOREFL sections.
+fn unreflexive() -> String {
+    let s = BASE.replacen(
+        "section MAIN",
+        "section FLAGS\nsection NOREFL\nsection MAIN",
+        1,
+    );
+    mutate(
+        &s,
+        &[
+            ("@d2 18 5", &unrefl_d2()),
+            ("5 rel:d1:d2", "8 rel:d1:d2"),
+            ("@d3 18 5", &unrefl_d3()),
+            ("5 rel:d2:d3", "8 rel:d2:d3"),
+        ],
+    )
+}
+
 const MINIMAL: &str = r#"# Susz 1 test vector: one axiom.
 section MAIN
 1 0 s:"A"               # name 1: A
@@ -355,6 +399,16 @@ pub fn all() -> Vec<Vector> {
         header_note(
             &flagged,
             "Ind and Eq as flagged inductive blocks (kind 7, lean4export 3.2), with FLAGS.",
+        ),
+        Want::Accept,
+    );
+
+    let unrefl = unreflexive();
+    add(
+        "norefl",
+        header_note(
+            &unrefl,
+            "Ind and Eq as flagged inductive blocks without isReflexive (kind 8, Lean since lean4#16595), with FLAGS and NOREFL.",
         ),
         Want::Accept,
     );
@@ -543,7 +597,7 @@ pub fn all() -> Vec<Vector> {
         r("nat-nonminimal", "a nat with a trailing zero byte.", "14 nat:0                # expr 2", "! 14 natx:00            # expr 2", NatNonMinimal),
         r("bool-2", "a bool byte 2.", "@d0 18 0 1 0 2 0", "! @d0 18 0 1 0 2 2", Bool),
         r("enum-binder", "binder 4.", "11 0 0 19 1             # expr 20", "! 11 4 0 19 1           # expr 20", Enum),
-        r("enum-decl-kind", "declaration kind 8.", "@d0 18 0 1 0 2 0", "! @d0 18 8 1 0 2 0", Enum),
+        r("enum-decl-kind", "declaration kind 9.", "@d0 18 0 1 0 2 0", "! @d0 18 9 1 0 2 0", Enum),
         r("enum-hints", "hints 3.", "@d1 18 1 2 0 2 1 2 1 0 1 2", "! @d1 18 1 2 0 2 1 3 1 0 1 2", Enum),
         r("enum-safety", "safety 3.", "@d1 18 1 2 0 2 1 2 1 0 1 2", "! @d1 18 1 2 0 2 1 2 1 3 1 2", Enum),
         r("enum-quot-kind", "quotient kind 4.", "@d4 18 4 12 1 4 1 0", "! @d4 18 4 12 1 4 1 4", Enum),
@@ -686,6 +740,64 @@ pub fn all() -> Vec<Vector> {
             "a flag byte 2 (hasLargeElim).",
         ),
         Want::Reject(Bool, Marked),
+    );
+    add(
+        "norefl-without-section",
+        header_note(
+            &mutate(
+                &unrefl,
+                &[
+                    ("section NOREFL", ""),
+                    ("@d2 18 8", &format!("! {}", unrefl_d2())),
+                ],
+            ),
+            "an inductive block without isReflexive (kind 8) in a file without NOREFL.",
+        ),
+        Want::Reject(FlagsSection, Marked),
+    );
+    add(
+        "norefl-without-flags",
+        header_note(
+            &mutate(
+                &unrefl,
+                &[
+                    ("section FLAGS", ""),
+                    ("@d2 18 8", &format!("! {}", unrefl_d2())),
+                ],
+            ),
+            "a kind-8 block, which is flagged, in a file with NOREFL but without FLAGS.",
+        ),
+        Want::Reject(FlagsSection, Marked),
+    );
+    add(
+        "norefl-mixed-kind7",
+        header_note(
+            &mutate(
+                &unrefl,
+                &[
+                    ("@d3 18 8", &format!("! {FLAGGED_D3}")),
+                    ("8 rel:d2:d3", "7 rel:d2:d3"),
+                ],
+            ),
+            "an inductive block with isReflexive (kind 7) in a file with NOREFL.",
+        ),
+        Want::Reject(FlagsSection, Marked),
+    );
+    add(
+        "norefl-section-without-block",
+        header_note(
+            &MINIMAL.replacen("section MAIN", "section NOREFL\nsection MAIN", 1),
+            "NOREFL without a block without isReflexive (no inductive block at all).",
+        ),
+        Want::Reject(FlagsSection, SectionAt(format::SEC_NOREFL, 0)),
+    );
+    add(
+        "norefl-section-not-empty",
+        header_note(
+            &unrefl.replace("section NOREFL", "section NOREFL\nx:00"),
+            "NOREFL holds a byte.",
+        ),
+        Want::Reject(FlagsSection, Entry(1, 16)),
     );
     add(
         "proofs-without-blocks",

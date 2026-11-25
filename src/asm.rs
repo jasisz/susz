@@ -5,7 +5,7 @@
 //! # a comment (to the end of the line, outside strings)
 //! header [magic=HEX] [major=N] [r16=N] [r32=N]
 //! counts NAMES LEVELS EXPRS DECLS
-//! section MAIN|PROOFS|SOURCE|PAD|INDEX|FLAGS|N [id=N] [flags=N] [res=N] [doff=±N] [dlen=±N]
+//! section MAIN|PROOFS|SOURCE|PAD|INDEX|FLAGS|NOREFL|N [id=N] [flags=N] [res=N] [doff=±N] [dlen=±N]
 //! block LABEL [decl=N]          # in PROOFS: a block (its records count from 1)
 //! trailer [tlen=N] [endmagic=HEX] [nsec=N]
 //! [!] [@LABEL] TOKENS...        # one record; `!` marks the expected error location
@@ -251,6 +251,7 @@ fn sec_id(s: &str) -> Result<u16, String> {
         "PAD" => format::SEC_PAD,
         "INDEX" => format::SEC_INDEX,
         "FLAGS" => format::SEC_FLAGS,
+        "NOREFL" => format::SEC_NOREFL,
         n => num(n)? as u16,
     })
 }

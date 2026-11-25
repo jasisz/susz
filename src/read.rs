@@ -86,9 +86,11 @@ pub enum Class {
     Counts,
     /// The file goes past one of this reader's own limits (declined).
     Limit,
-    /// FLAGS and the flagged inductive blocks (kind 7) disagree: a kind-7
-    /// declaration without FLAGS, a kind-5 declaration with FLAGS, FLAGS
-    /// without a kind-7 one, or FLAGS not empty.
+    /// FLAGS or NOREFL and the inductive blocks disagree: a flagged block
+    /// (kind 7 or 8) without FLAGS, a kind-5 declaration with FLAGS, FLAGS
+    /// without a flagged one; a kind-8 declaration without NOREFL, a kind-5
+    /// or kind-7 one with NOREFL, NOREFL without a kind-8 one; or either
+    /// section not empty.
     FlagsSection,
 }
 
@@ -454,13 +456,17 @@ impl<'a> File<'a> {
             }
         }
         for (i, s) in sections.iter().enumerate() {
-            if s.id == format::SEC_FLAGS && s.length != 0 {
+            if (s.id == format::SEC_FLAGS || s.id == format::SEC_NOREFL) && s.length != 0 {
                 return Err(Failure::new(
                     Class::FlagsSection,
                     Place::Directory,
                     ts + 20 + format::ENTRY_LEN * i as u64 + 16,
                     i as u64 + 1,
-                    format!("FLAGS holds {} bytes: it is empty", s.length),
+                    format!(
+                        "{} holds {} bytes: it is empty",
+                        format::section_name(s.id),
+                        s.length
+                    ),
                 ));
             }
         }
@@ -505,9 +511,12 @@ impl<'a> File<'a> {
         let s = self.section(format::SEC_MAIN).expect("open checks MAIN");
         let proofs = self.section(format::SEC_PROOFS);
         let flags = self.section(format::SEC_FLAGS);
+        let norefl = self.section(format::SEC_NOREFL);
         Main {
             flags,
             flagged: false,
+            norefl,
+            unreflexive: false,
             bytes: self.bytes,
             p: s.offset as usize,
             end: (s.offset + s.length) as usize,
@@ -641,9 +650,13 @@ pub struct IndType<'a> {
     pub ctors: Ids<'a>,
     pub num_nested: u64,
     pub is_rec: bool,
-    pub is_reflexive: bool,
+    /// `isReflexive` as the export gave it: `Some` for every type of a
+    /// kind-5 or kind-7 block, `None` for every type of a kind-8 block (an
+    /// export that does not carry it, as Lean's since lean4#16595). A kernel
+    /// computes it itself either way.
+    pub is_reflexive: Option<bool>,
     /// The five flags of lean4export 3.2: `Some` for every type of a
-    /// flagged block (kind 7), `None` for every type of a kind-5 block.
+    /// flagged block (kind 7 or 8), `None` for every type of a kind-5 block.
     pub flags: Option<IndFlags>,
 }
 
@@ -682,9 +695,12 @@ pub struct Inductive<'a> {
     pub types: Vec<IndType<'a>>,
     pub ctors: Vec<Ctor<'a>>,
     pub recs: Vec<Rec<'a>>,
-    /// A flagged block (kind 7): every type carries the flags of
+    /// A flagged block (kind 7 or 8): every type carries the flags of
     /// lean4export 3.2.
     pub flagged: bool,
+    /// Every type carries `isReflexive` (kinds 5 and 7); `false` for a
+    /// kind-8 block.
+    pub reflexive: bool,
 }
 
 /// A theorem's proof block: where it is and what it may name.
@@ -743,7 +759,7 @@ pub enum Decl<'a> {
 }
 
 impl Decl<'_> {
-    /// The kind byte (0-7).
+    /// The kind byte (0-8).
     pub fn kind(&self) -> u8 {
         match self {
             Decl::Axiom { .. } => 0,
@@ -751,6 +767,7 @@ impl Decl<'_> {
             Decl::Thm { .. } => 2,
             Decl::Opaque { .. } => 3,
             Decl::Quot { .. } => 4,
+            Decl::Inductive(i) if !i.reflexive => 8,
             Decl::Inductive(i) if i.flagged => 7,
             Decl::Inductive(_) => 5,
             Decl::ThmBlock { .. } => 6,
@@ -1066,9 +1083,12 @@ pub struct Main<'a> {
     counts: [u32; 4],
     trailer: u64,
     proofs: Option<Section>,
-    // FLAGS, and whether a kind-7 declaration was read
+    // FLAGS, and whether a kind-7 or kind-8 declaration was read
     flags: Option<Section>,
     flagged: bool,
+    // NOREFL, and whether a kind-8 declaration was read
+    norefl: Option<Section>,
+    unreflexive: bool,
     st: State,
 }
 
@@ -1367,7 +1387,7 @@ impl<'a> Main<'a> {
     }
 
     fn decl(&mut self, c: &mut Cur<'a>) -> Result<Decl<'a>, E> {
-        let kind = c.enm(7, "declaration kind")?;
+        let kind = c.enm(8, "declaration kind")?;
         Ok(match kind {
             0 => {
                 let head = self.head(c)?;
@@ -1419,8 +1439,26 @@ impl<'a> Main<'a> {
                     kind: c.enm(3, "quotient kind")?,
                 }
             }
-            5 | 7 => {
-                let flagged = kind == 7;
+            5 | 7 | 8 => {
+                let flagged = kind != 5;
+                let reflexive = kind != 8;
+                if reflexive {
+                    if self.norefl.is_some() {
+                        return Err((
+                            Class::FlagsSection,
+                            "an inductive block with isReflexive in a file with NOREFL".into(),
+                        ));
+                    }
+                } else {
+                    if self.norefl.is_none() {
+                        return Err((
+                            Class::FlagsSection,
+                            "an inductive block without isReflexive in a file without NOREFL"
+                                .into(),
+                        ));
+                    }
+                    self.unreflexive = true;
+                }
                 if flagged {
                     if self.flags.is_none() {
                         return Err((
@@ -1446,7 +1484,7 @@ impl<'a> Main<'a> {
                     let ctors = self.names(c)?;
                     let num_nested = c.v()?;
                     let is_rec = c.boolean()?;
-                    let is_reflexive = c.boolean()?;
+                    let is_reflexive = if reflexive { Some(c.boolean()?) } else { None };
                     let flags = if flagged {
                         let mut a = [false; 5];
                         for x in a.iter_mut() {
@@ -1523,6 +1561,7 @@ impl<'a> Main<'a> {
                     ctors,
                     recs,
                     flagged,
+                    reflexive,
                 }))
             }
             _ => {
@@ -1598,6 +1637,15 @@ impl<'a> Main<'a> {
                 s.offset,
                 0,
                 "FLAGS without a flagged inductive block",
+            ));
+        }
+        if let (Some(s), false) = (self.norefl, self.unreflexive) {
+            return Err(Failure::new(
+                Class::FlagsSection,
+                Place::Section(format::SEC_NOREFL),
+                s.offset,
+                0,
+                "NOREFL without an inductive block without isReflexive",
             ));
         }
         if let Some(s) = self.proofs {

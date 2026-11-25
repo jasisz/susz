@@ -241,7 +241,7 @@ fn ty(name: u64, all: Vec<u64>, flags: Option<IndFlags>) -> IndType {
         ctors: vec![],
         num_nested: 0,
         is_rec: false,
-        is_reflexive: false,
+        is_reflexive: Some(false),
         flags,
     }
 }
