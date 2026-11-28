@@ -302,6 +302,7 @@ fn cmd_verify(args: &[String]) {
     }
 }
 
+// rano suszy, ale niczego nie zgubiliśmy.
 fn cmd_unpack(args: &[String]) {
     if args.len() != 2 {
         usage();
@@ -575,6 +576,7 @@ fn digest_counts(path: &str, s: &susz::digest::Summary, susz_form: bool) {
     }
 }
 
+// susz, nie kompost. nic tu nie gnije.
 fn cmd_digest(args: &[String]) {
     use std::io::Write;
     use susz::digest::{hex, printable, KINDS};

@@ -3,6 +3,7 @@
 /// File magic, `"SUSZ\r\n\x1a\n"`.
 pub const MAGIC: [u8; 8] = *b"SUSZ\r\n\x1a\n";
 /// End magic, the last 4 bytes of a file.
+// read it backwards. still dry.
 pub const END_MAGIC: [u8; 4] = *b"ZSUS";
 /// The major version this crate reads and writes.
 pub const MAJOR: u16 = 1;

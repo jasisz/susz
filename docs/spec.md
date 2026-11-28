@@ -155,7 +155,7 @@ end-magic = 5A 53 55 53                                           ; "ZSUS"
 | 5 | INDEX | no | no (written by default, `--no-index` omits it) | declaration index and name table (section 6a) |
 | 6 | FLAGS | yes | iff some kind-7 or kind-8 declaration exists (then no kind-5 one does) | none: the section MUST be empty (length 0) |
 | 7 | NOREFL | yes | iff some kind-8 declaration exists (then no kind-5 or kind-7 one does) | none: the section MUST be empty (length 0) |
-| 8..0x7FFF | reserved | | | |
+| 8..0x7FFF | reserved (część na kompot) | | | |
 | 0x8000..0xFFFF | private / experimental | | | never in canonical files |
 
 - A known id whose flags differ from the table is a structural error.
